@@ -1,0 +1,83 @@
+name: Build Gauguin 4.19 KSU
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Configuration
+        run: |
+          echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> $GITHUB_ENV
+
+      - name: Setup build kernel environment
+        run: |
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install git flex lzop bison make libssl-dev python3 python-is-python3 libncurses-dev
+
+      - name: Download Toolchains
+        run: |
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          wget https://github.com/ZyCromerZ/Clang/releases/download/11.1.0-20220724-release/Clang-11.1.0-20220724.tar.gz
+          mkdir clang
+          cd clang
+          tar -zvxf ../Clang-11.1.0-20220724.tar.gz
+
+      - name: Checkout Kernel Source
+        run: |
+          git clone --depth=1 https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin project
+          rm -rf project/drivers/kernelsu
+
+      - name: Setup Patches
+        run: |
+          cd project
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
+            echo "CONFIG_KSU_SUSFS=n"
+          } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
+          git apply ../ksu_hooks_sukisu_4.19.patch
+
+      - name: Setup SukiSU-Ultra (From Stable Fork)
+        run: |
+          cd project
+          
+          # 1. 抛弃 setup.sh，直接拉取你找到的 Fork 仓库的 builtin 分支
+          git clone -b builtin https://github.com/JackA1ltman/SukiSU-Ultra.git KernelSU
+          
+          # 2. 进入 drivers 目录，建立指向 KernelSU/kernel 的软链接
+          cd drivers
+          ln -sf ../KernelSU/kernel kernelsu
+          
+          # 3. 暴力注入：修改内核的 Makefile
+          grep -q "kernelsu" Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> Makefile
+          
+          # 4. 暴力注入：修改内核的 Kconfig
+          grep -q "source \"drivers/kernelsu/Kconfig\"" Kconfig || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" Kconfig
+          cd ..
+          
+          # 5. 将这些手动完成的底层修改提交到本地 Git，保持环境干净
+          git config --global user.email "bot@example.com"
+          git config --global user.name "bot"
+          git add .
+          git commit -m "ksu integrated from stable fork repo"
+
+      - name: Build kernel
+        run: |
+          cd project
+          export PATH=$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/clang/bin:$PATH
+          export ARCH=arm64
+          export SUBARCH=arm64
+          make O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 ${{ env.KERNEL_DEFCONFIG }}
+          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1
+
+      - name: Upload the kernel zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gauguin_4.19_${{ env.BUILD_TIME}}
+          path: |
+            project/out/arch/arm64/boot/*
