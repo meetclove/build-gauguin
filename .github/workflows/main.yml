@@ -42,29 +42,34 @@ jobs:
           } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
           git apply ../ksu_hooks_sukisu_4.19.patch
 
-      - name: Setup SukiSU-Ultra (From Stable Fork)
+      - name: Setup SukiSU-Ultra (Pinned strictly to builtin 6c13a069)
         run: |
           cd project
           
-          # 1. 抛弃 setup.sh，直接拉取你找到的 Fork 仓库的 builtin 分支
-          git clone -b builtin https://github.com/JackA1ltman/SukiSU-Ultra.git KernelSU
+          # 1. 明确且仅拉取官方仓库的 builtin 分支
+          git clone -b builtin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
           
-          # 2. 进入 drivers 目录，建立指向 KernelSU/kernel 的软链接
+          # 2. 进入仓库，精准检出你 4 月份成功编译的那个 Commit
+          cd KernelSU
+          git checkout 6c13a069
+          cd ..
+          
+          # 3. 建立正确的软链接映射
           cd drivers
           ln -sf ../KernelSU/kernel kernelsu
           
-          # 3. 暴力注入：修改内核的 Makefile
+          # 4. 暴力注入：修改内核的 Makefile
           grep -q "kernelsu" Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> Makefile
           
-          # 4. 暴力注入：修改内核的 Kconfig
+          # 5. 暴力注入：修改内核的 Kconfig
           grep -q "source \"drivers/kernelsu/Kconfig\"" Kconfig || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" Kconfig
           cd ..
           
-          # 5. 将这些手动完成的底层修改提交到本地 Git，保持环境干净
+          # 6. 保存环境状态，清理工作区
           git config --global user.email "bot@example.com"
           git config --global user.name "bot"
           git add .
-          git commit -m "ksu integrated from stable fork repo"
+          git commit -m "ksu strictly pinned to builtin 6c13a069"
 
       - name: Build kernel
         run: |
