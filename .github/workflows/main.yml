@@ -42,7 +42,7 @@ jobs:
           } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
           git apply ../ksu_hooks_sukisu_4.19.patch
 
-      - name: Setup SukiSU-Ultra (Pinned strictly to builtin 6c13a069)
+      - name: Setup SukiSU-Ultra (Pinned strictly to builtin 544842d0f611f672f8b3c449b7f17afd57da920f)
         run: |
           cd project
           
@@ -51,7 +51,7 @@ jobs:
           
           # 2. 进入仓库，精准检出你 4 月份成功编译的那个 Commit
           cd KernelSU
-          git checkout 6c13a069
+          git checkout 544842d0f611f672f8b3c449b7f17afd57da920f
           cd ..
           
           # 3. 建立正确的软链接映射
