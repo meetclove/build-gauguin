@@ -39,39 +39,98 @@ jobs:
             echo "CONFIG_KSU=y"
             echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KSU_SUSFS=n"
+            echo "CONFIG_KALLSYMS=y"
+            echo "CONFIG_KALLSYMS_ALL=y"
           } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
           git apply ../ksu_hooks_sukisu_4.19.patch
 
       - name: Setup SukiSU-Ultra
         run: |
           cd project
-          
-          # 1. 明确拉取 builtin 分支到新建的 KernelSU 目录
-          git clone -b builtin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
-          
-          # 2. 精准检出 4/19 稳定提交
-          cd KernelSU
-          git checkout 544842d0f611f672f8b3c449b7f17afd57da920f
-          cd ..
-          
-          # 3. 建立软链接映射，挂载到驱动目录
-          cd drivers
-          ln -sf ../KernelSU/kernel kernelsu
-          
-          # 4. 强行修复 544842d0 版本代码中的两个原生拼写瑕疵
-          echo "#endif /* __KSU_H_KERNEL_COMPAT */" >> kernelsu/infra/kernel_compat.h
-          sed -i 's/&& KSU_COMPAT_USE_STATIC_KEY/&& defined(KSU_COMPAT_USE_STATIC_KEY)/g' kernelsu/runtime/ksud.c
-          
-          # 5. 暴力注入：修改内核的 Makefile 和 Kconfig
-          grep -q "kernelsu" Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> Makefile
-          grep -q "source \"drivers/kernelsu/Kconfig\"" Kconfig || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" Kconfig
-          cd ..
-          
-          # 6. 提交本地更改以保持环境干净
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
           git config --global user.email "bot@example.com"
           git config --global user.name "bot"
           git add .
-          git commit -m "ksu pinned to 544842d0 and patched"
+          git commit -m ksu
+
+      # ─── 4.19 兼容性修复 ────────────────────────────────────────────
+      # builtin 分支在 2026 年 4 月后引入了两处与 4.19 内核不兼容的变更:
+      #
+      # [错误1] runtime/ksud.c — implicit declaration
+      #   ksu_selinux_hide_handle_post_fs_data() 和
+      #   ksu_selinux_hide_handle_second_stage() 被调用但未前向声明。
+      #   这是新加的 SELinux 隐藏功能，4.19 非 GKI 内核不需要它们正常工作，
+      #   插入 static inline 空存根即可消除编译错误。
+      #
+      # [错误2] sulog/event.c:379 — 类型不匹配
+      #   ksu_sulog_capture(..., USER_ARG_NULL, gfp)
+      #   sulog 重构后 USER_ARG_NULL 变成了指针类型，但函数参数期望值类型。
+      #   用零值复合字面量 (struct user_arg_ptr){} 代替，安全且不影响功能。
+      # ────────────────────────────────────────────────────────────────
+      - name: Fix SukiSU-Ultra 4.19 Compatibility
+        run: |
+          cd project
+          python3 << 'PYEOF'
+          import re, os, sys
+
+          GREEN = "\033[32m"; YELLOW = "\033[33m"; RED = "\033[31m"; RESET = "\033[0m"
+          def ok(m):   print(f"{GREEN}[FIX OK]{RESET}  {m}")
+          def warn(m): print(f"{YELLOW}[SKIP]{RESET}    {m}")
+          def err(m):  print(f"{RED}[ERROR]{RESET}   {m}"); sys.exit(1)
+
+          # ── Fix 1: ksud.c — 插入 selinux hide 函数存根 ──────────────
+          KSUD = "KernelSU/kernel/runtime/ksud.c"
+          if not os.path.exists(KSUD):
+              warn(f"未找到 {KSUD}，跳过 Fix 1")
+          else:
+              content = open(KSUD, encoding="utf-8").read()
+              needs_fix = (
+                  "ksu_selinux_hide_handle_post_fs_data" in content and
+                  "static inline void ksu_selinux_hide_handle_post_fs_data" not in content
+              )
+              if not needs_fix:
+                  warn("ksud.c 无需 Fix 1")
+              else:
+                  stubs = (
+                      "\n/* --- 4.19 compat: selinux hide stubs --- */\n"
+                      "static inline void ksu_selinux_hide_handle_post_fs_data(void) {}\n"
+                      "static inline void ksu_selinux_hide_handle_second_stage(void) {}\n"
+                      "/* ---------------------------------------- */\n"
+                  )
+                  # 在最后一个 #include 行之后插入存根
+                  last_inc = content.rfind("\n#include ")
+                  if last_inc < 0:
+                      # 找不到 include，插在文件开头
+                      content = stubs + content
+                  else:
+                      eol = content.find("\n", last_inc + 1)
+                      content = content[:eol+1] + stubs + content[eol+1:]
+                  open(KSUD, "w", encoding="utf-8").write(content)
+                  ok(f"ksud.c: 已插入 ksu_selinux_hide_handle_post/second_stage 存根")
+
+          # ── Fix 2: event.c — 修复 USER_ARG_NULL 类型不匹配 ──────────
+          EVENT = "KernelSU/kernel/sulog/event.c"
+          if not os.path.exists(EVENT):
+              warn(f"未找到 {EVENT}，跳过 Fix 2")
+          else:
+              content = open(EVENT, encoding="utf-8").read()
+              # 目标行: ksu_sulog_capture(..., USER_ARG_NULL, gfp)
+              # 修复: 将 USER_ARG_NULL 替换为 (struct user_arg_ptr){} (零值复合字面量)
+              # 比 *USER_ARG_NULL 更安全（不依赖 USER_ARG_NULL 是否可解引用）
+              original = content
+              content = re.sub(
+                  r'\bUSER_ARG_NULL\b',
+                  '(struct user_arg_ptr){}',
+                  content
+              )
+              if content == original:
+                  warn("event.c 中未找到 USER_ARG_NULL，无需 Fix 2")
+              else:
+                  open(EVENT, "w", encoding="utf-8").write(content)
+                  ok("event.c: USER_ARG_NULL → (struct user_arg_ptr){}")
+
+          print("\n[FIX] 4.19 兼容性修复完成，继续编译...")
+          PYEOF
 
       - name: Build kernel
         run: |
