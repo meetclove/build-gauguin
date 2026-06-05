@@ -44,17 +44,37 @@ jobs:
           } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
           git apply ../ksu_hooks_sukisu_4.19.patch
 
-      - name: Setup SukiSU-Ultra
+      - name: Setup SukiSU-Ultra (pinned to last stable commit)
         run: |
           cd project
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-          # 回档到 2026-04-30 前的最后稳定提交
-          # builtin 分支 5 月后的新提交引入了 4.19 不兼容变更
+          # ── 回档策略 ──────────────────────────────────────────────────
+          # builtin 分支在 2026 年 5 月后合入了两处 4.19 不兼容提交:
+          #   1. ksud.c 新增 SELinux 隐藏功能调用了未声明的函数
+          #   2. sulog/event.c 将 USER_ARG_NULL 改为指针类型造成类型不匹配
+          #
+          # 强行 patch 修复不可靠（上游还可能继续引入新的不兼容变更）。
+          # 最稳妥方案: 用 git log --before 找到 2026-04-30 前的最后提交，
+          # 无需 fork，无需硬编码 hash，也无需手动维护。
+          # ─────────────────────────────────────────────────────────────
           LAST_GOOD=$(cd KernelSU && git log --format="%H" --before="2026-04-18T00:00:00" | head -1)
+
           if [ -n "$LAST_GOOD" ]; then
-            cd KernelSU && git checkout "$LAST_GOOD" && cd ..
-            echo "[KSU] 已回档: $(cd KernelSU && git log -1 --format='%h %ci')"
+            cd KernelSU
+            git checkout "$LAST_GOOD"
+            PINNED_VER=$(git rev-list --count HEAD)
+            PINNED_DATE=$(git log -1 --format="%ci")
+            cd ..
+            echo "========================================================"
+            echo "[KSU] 已回档到 4 月最后可用提交"
+            echo "[KSU] Commit : $LAST_GOOD"
+            echo "[KSU] 日期   : $PINNED_DATE"
+            echo "[KSU] 版本号 : $PINNED_VER"
+            echo "[KSU] 对应 APK: 最新版 SukiSU-Ultra 即可"
+            echo "========================================================"
+          else
+            echo "[KSU] 警告: 未找到 2026-04-30 前的提交，使用当前 HEAD"
           fi
 
           git config --global user.email "bot@example.com"
@@ -68,23 +88,12 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/clang/bin:$PATH
           export ARCH=arm64
           export SUBARCH=arm64
-
-          # KSU_VERSION=13377 写死版本号，与 SukiSU v3.2.0 (13377) APK 精确匹配
-          # KernelSU Makefile 优先使用此变量，不再从 git commit 计数
-          make O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 \
-            KSU_VERSION=13377 \
-            ${{ env.KERNEL_DEFCONFIG }}
-
-          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 \
-            KSU_VERSION=13377
+          make O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 ${{ env.KERNEL_DEFCONFIG }}
+          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1
 
       - name: Upload the kernel zip
         uses: actions/upload-artifact@v4
         with:
-          name: Gauguin_4.19_SukiSU_13377_${{ env.BUILD_TIME}}
+          name: Gauguin_4.19_${{ env.BUILD_TIME}}
           path: |
             project/out/arch/arm64/boot/*
