@@ -51,7 +51,7 @@ jobs:
 
           # 回档到 2026-04-30 前的最后稳定提交
           # builtin 分支 5 月后的新提交引入了 4.19 不兼容变更
-          LAST_GOOD=$(cd KernelSU && git log --format="%H" --before="2026-04-30T00:00:00" | head -1)
+          LAST_GOOD=$(cd KernelSU && git log --format="%H" --before="2026-04-18T00:00:00" | head -1)
           if [ -n "$LAST_GOOD" ]; then
             cd KernelSU && git checkout "$LAST_GOOD" && cd ..
             echo "[KSU] 已回档: $(cd KernelSU && git log -1 --format='%h %ci')"
