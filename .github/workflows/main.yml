@@ -58,7 +58,7 @@ jobs:
           # 最稳妥方案: 用 git log --before 找到 2026-04-30 前的最后提交，
           # 无需 fork，无需硬编码 hash，也无需手动维护。
           # ─────────────────────────────────────────────────────────────
-          LAST_GOOD=$(cd KernelSU && git log --format="%H" --before="2026-04-18T00:00:00" | head -1)
+          LAST_GOOD=$(cd KernelSU && git log --format="%H" --before="2026-04-30T00:00:00" | head -1)
 
           if [ -n "$LAST_GOOD" ]; then
             cd KernelSU
