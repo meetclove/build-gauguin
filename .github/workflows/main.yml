@@ -1,4 +1,4 @@
-name: Build Gauguin 4.19 KSU
+name: Build Gauguin 4.19 KSU+KPM+SuSFS
 on:
   workflow_dispatch:
 jobs:
@@ -23,77 +23,108 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
           wget https://github.com/ZyCromerZ/Clang/releases/download/11.1.0-20220724-release/Clang-11.1.0-20220724.tar.gz
-          mkdir clang
-          cd clang
-          tar -zvxf ../Clang-11.1.0-20220724.tar.gz
+          mkdir clang && cd clang && tar -zvxf ../Clang-11.1.0-20220724.tar.gz
 
       - name: Checkout Kernel Source
         run: |
           git clone --depth=1 https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin project
           rm -rf project/drivers/kernelsu
 
+      - name: Clone SuSFS patches
+        # 克隆 susfs4ksu 的 kernel-4.19 分支，用于后续两步打 patch
+        # 分离此步骤以便更清晰地追踪问题
+        run: |
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
+              -b kernel-4.19 /tmp/susfs4ksu
+          echo "[SUSFS] 克隆完成，版本: $(cat /tmp/susfs4ksu/VERSION 2>/dev/null || echo 'unknown')"
+
       - name: Setup Patches
         run: |
           cd project
+
+          # ── KernelSU manual hook 补丁 ─────────────────────────────
+          git apply ../ksu_hooks_sukisu_4.19.patch
+
+          # ── SuSFS 内核侧补丁 ──────────────────────────────────────
+          # 1. 复制 susfs 源文件进内核
+          cp /tmp/susfs4ksu/kernel_patches/fs/susfs.c fs/
+          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+          echo "[SUSFS] susfs.c 和 susfs.h 已复制"
+
+          # 2. 应用内核集成补丁（向 fs/namei.c 等添加 susfs hook 点）
+          patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch \
+              || echo "[SUSFS] 部分 hunk 失败，已继续（可能是已应用过或内核代码有差异）"
+
+          # ── defconfig ─────────────────────────────────────────────
           {
+            # KernelSU
             echo "CONFIG_KSU=y"
             echo "CONFIG_KSU_MANUAL_HOOK=y"
-            echo "CONFIG_KSU_SUSFS=n"
+            # KPM — Kernel Plugin Module
+            # 4.19 不需要 backport set_memory.h（低于 4.19 才需要）
+            echo "CONFIG_KPM=y"
+            # SuSFS
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
+            # manual hook 内核必须禁用 SUS_SU（仅 kprobe 内核可用）
+            echo "CONFIG_KSU_SUSFS_SUS_SU=n"
+            # KernelSU 0.9.5 使用 overlay mount，非 magic mount
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=n"
+            # KALLSYMS（KPM 必需）
             echo "CONFIG_KALLSYMS=y"
             echo "CONFIG_KALLSYMS_ALL=y"
           } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
-          git apply ../ksu_hooks_sukisu_4.19.patch
 
-      - name: Setup SukiSU-Ultra (pinned to last stable commit)
+      - name: Setup SukiSU-Ultra
         run: |
           cd project
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+              | bash -s builtin
 
-          # ── 回档策略 ──────────────────────────────────────────────────
-          # builtin 分支在 2026 年 5 月后合入了两处 4.19 不兼容提交:
-          #   1. ksud.c 新增 SELinux 隐藏功能调用了未声明的函数
-          #   2. sulog/event.c 将 USER_ARG_NULL 改为指针类型造成类型不匹配
-          #
-          # 强行 patch 修复不可靠（上游还可能继续引入新的不兼容变更）。
-          # 最稳妥方案: 用 git log --before 找到 2026-04-30 前的最后提交，
-          # 无需 fork，无需硬编码 hash，也无需手动维护。
-          # ─────────────────────────────────────────────────────────────
-          LAST_GOOD=$(cd KernelSU && git log --format="%H" --before="2026-04-30T00:00:00" | head -1)
-
+          # 回档到 2026-04-30 前（避免 5 月后的 4.19 不兼容新提交）
+          LAST_GOOD=$(cd KernelSU && git log --format="%H" --max-count=1 --before="2026-04-30T00:00:00")
           if [ -n "$LAST_GOOD" ]; then
-            cd KernelSU
-            git checkout "$LAST_GOOD"
-            PINNED_VER=$(git rev-list --count HEAD)
-            PINNED_DATE=$(git log -1 --format="%ci")
-            cd ..
-            echo "========================================================"
-            echo "[KSU] 已回档到 4 月最后可用提交"
-            echo "[KSU] Commit : $LAST_GOOD"
-            echo "[KSU] 日期   : $PINNED_DATE"
-            echo "[KSU] 版本号 : $PINNED_VER"
-            echo "[KSU] 对应 APK: 最新版 SukiSU-Ultra 即可"
-            echo "========================================================"
-          else
-            echo "[KSU] 警告: 未找到 2026-04-30 前的提交，使用当前 HEAD"
+            cd KernelSU && git checkout "$LAST_GOOD" && cd ..
+            echo "[KSU] 已回档: $(cd KernelSU && git log -1 --format='%h  %ci')"
           fi
+
+          # SuSFS KernelSU 侧补丁
+          # builtin 分支可能已包含此补丁，--forward 跳过已应用的 hunk
+          cd KernelSU
+          patch -p1 --forward < /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
+              || echo "[SUSFS] KSU patch 已存在或不适用，继续..."
+          cd ..
 
           git config --global user.email "bot@example.com"
           git config --global user.name "bot"
           git add .
-          git commit -m ksu
+          git commit -m "ksu+kpm+susfs"
 
       - name: Build kernel
         run: |
           cd project
           export PATH=$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/clang/bin:$PATH
-          export ARCH=arm64
-          export SUBARCH=arm64
-          make O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 ${{ env.KERNEL_DEFCONFIG }}
-          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1
+          make O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 \
+            ${{ env.KERNEL_DEFCONFIG }}
+          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1
 
       - name: Upload the kernel zip
         uses: actions/upload-artifact@v4
         with:
-          name: Gauguin_4.19_${{ env.BUILD_TIME}}
+          name: Gauguin_4.19_KSU_KPM_SUSFS_${{ env.BUILD_TIME}}
           path: |
             project/out/arch/arm64/boot/*
+
+
+
+
+
+
+
