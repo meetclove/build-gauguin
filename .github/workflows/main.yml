@@ -49,7 +49,9 @@ jobs:
           # 1. 复制 susfs 源文件进内核
           cp /tmp/susfs4ksu/kernel_patches/fs/susfs.c fs/
           cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-          echo "[SUSFS] susfs.c 和 susfs.h 已复制"
+          # susfs_def.h 是 fdinfo.c 等文件 include 的独立定义头，必须一并复制
+          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
+          echo "[SUSFS] susfs.c / susfs.h / susfs_def.h 已复制"
 
           # 2. 应用内核集成补丁（向 fs/namei.c 等添加 susfs hook 点）
           patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch \
@@ -121,10 +123,3 @@ jobs:
           name: Gauguin_4.19_KSU_KPM_SUSFS_${{ env.BUILD_TIME}}
           path: |
             project/out/arch/arm64/boot/*
-
-
-
-
-
-
-
