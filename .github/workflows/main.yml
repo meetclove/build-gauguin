@@ -1,125 +1,138 @@
-name: Build Gauguin 4.19 KSU+KPM+SuSFS
+name: Build Gauguin Kernel (gauguin-q-oss, clean/stock)
+
+# 纯净编译，不集成KernelSU、不打任何patch，先确认这个能编译过、
+# 刷进去能正常开机，再考虑后面叠加KSU的事
+
 on:
   workflow_dispatch:
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Setup Configuration
+      - name: Install build dependencies
         run: |
-          echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> $GITHUB_ENV
+          sudo apt-get update -qq
+          sudo apt-get install -y bison flex libssl-dev bc libncurses-dev \
+            build-essential libelf-dev rsync
 
-      - name: Setup build kernel environment
+      # Android 10对应分支，已用 git ls-remote 确认存在
+      - name: Checkout Xiaomi official kernel source (gauguin-q-oss)
         run: |
-          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
-          sudo apt-get update
-          sudo apt-get install git flex lzop bison make libssl-dev python3 python-is-python3 libncurses-dev
+          git clone --depth 1 --branch gauguin-q-oss \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
 
-      - name: Download Toolchains
+      # ZyCromerZ的clang11/gcc4.9都是release附件，不在git仓库内容里，
+      # 必须下载release tarball解压，不能直接git clone
+      # 换成AOSP官方clang r416183b + 配套gcc4.9（LineageOS镜像，
+      # 之前Dhollmen验证过这套组合能用），而不是ZyCromerZ那份
+      - name: Download AOSP Clang r416183b toolchain
         run: |
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
-          wget https://github.com/ZyCromerZ/Clang/releases/download/11.1.0-20220724-release/Clang-11.1.0-20220724.tar.gz
-          mkdir clang && cd clang && tar -zvxf ../Clang-11.1.0-20220724.tar.gz
+          git clone --depth 1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git toolchain/clang11
+          toolchain/clang11/bin/clang --version
 
-      - name: Checkout Kernel Source
+      - name: Download matching AOSP GCC 4.9 toolchain
         run: |
-          git clone --depth=1 https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin project
-          rm -rf project/drivers/kernelsu
+          git clone --depth 1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git toolchain/gcc49
 
-      - name: Clone SuSFS patches
-        # 克隆 susfs4ksu 的 kernel-4.19 分支，用于后续两步打 patch
-        # 分离此步骤以便更清晰地追踪问题
+      # 官方源码里 scripts/gcc-wrapper.py 是python2语法(print不带括号)，
+      # 现代CI镜像已经没有python2了，这里改成python3语法，纯语法转换，
+      # 不改变任何编译行为/产物，这是唯一动过的源码文件
+      - name: Fix python2 syntax in scripts/gcc-wrapper.py
         run: |
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
-              -b kernel-4.19 /tmp/susfs4ksu
-          echo "[SUSFS] 克隆完成，版本: $(cat /tmp/susfs4ksu/VERSION 2>/dev/null || echo 'unknown')"
+          cd kernel
+          sed -i \
+            -e 's/print "error, forbidden warning:", m.group(2)/print("error, forbidden warning:", m.group(2))/' \
+            -e "s/print line,/print(line, end='')/" \
+            -e "s/print args\[0\] + ':',e.strerror/print(args[0] + ':', e.strerror)/" \
+            -e "s/print 'Is your PATH set correctly?'/print('Is your PATH set correctly?')/" \
+            -e "s/print ' '.join(args), str(e)/print(' '.join(args), str(e))/" \
+            -e '1s/python2/python3/' \
+            scripts/gcc-wrapper.py
 
-      - name: Setup Patches
+      # 根本修复vdso "unrecognised emulation mode: aarch64linux"：
+      # Clang 11+对--prefix=的搜索逻辑变了，只给目录($(GCC_TOOLCHAIN_DIR))
+      # 时只会去找裸名的as/ld，找不到就掉回系统PATH，捡到x86_64的系统ld。
+      # 把交叉编译前缀拼进prefix里，clang才能找到真正的
+      # aarch64-linux-android-as/-ld。这是内核社区确认过的标准修复
+      # (Fangrui Song/MaskRay在上游Linux的对应提交)。
+      - name: Fix GCC_TOOLCHAIN_DIR prefix for Clang cross compilation
         run: |
-          cd project
+          cd kernel
+          sed -i 's|CLANG_FLAGS\t+= --prefix=$(GCC_TOOLCHAIN_DIR)$|CLANG_FLAGS\t+= --prefix=$(GCC_TOOLCHAIN_DIR)$(notdir $(CROSS_COMPILE))|' Makefile
+          grep -n "prefix=\$(GCC_TOOLCHAIN_DIR)" Makefile
 
-          # ── KernelSU manual hook 补丁 ─────────────────────────────
-          git apply ../ksu_hooks_sukisu_4.19.patch
+      # 继续往下编译会撞到的第二个坑：modpost给gsi_write_channel_scratch
+      # 生成CRC版本符号时，跟lld的重定位处理不兼容，报
+      # R_AARCH64_ABS32 cannot be used against symbol ...
+      # 官方作法是干脆不给这一个符号生成CRC版本(gauguin/lito平台社区已验证过的修复)
+      - name: Fix GSI symbol CRC versioning for lld compatibility
+        run: |
+          cd kernel
+          sed -i 's/if (is_crc) {/if (is_crc \&\& strcmp(symname + strlen(CRC_PFX), "gsi_write_channel_scratch")) {/' scripts/mod/modpost.c
+          grep -n "gsi_write_channel_scratch" scripts/mod/modpost.c
 
-          # ── SuSFS 内核侧补丁 ──────────────────────────────────────
-          # 1. 复制 susfs 源文件进内核
-          cp /tmp/susfs4ksu/kernel_patches/fs/susfs.c fs/
-          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-          # susfs_def.h 是 fdinfo.c 等文件 include 的独立定义头，必须一并复制
-          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
-          echo "[SUSFS] susfs.c / susfs.h / susfs_def.h 已复制"
-
-          # 2. 应用内核集成补丁（向 fs/namei.c 等添加 susfs hook 点）
-          patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch \
-              || echo "[SUSFS] 部分 hunk 失败，已继续（可能是已应用过或内核代码有差异）"
-
-          # ── defconfig ─────────────────────────────────────────────
+      # 第三个坑：clang 12会把某些sprintf(dest,"%s",str)优化成stpcpy调用，
+      # 但内核自己的精简字符串库里没实现这个函数，链接时报undefined symbol。
+      # 照官方内核后来的正式修复(Nick Desaulniers)把stpcpy补上
+      - name: Implement stpcpy for Clang 12 libcall optimization
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          path = "lib/string.c"
+          with open(path) as f:
+              content = f.read()
+          stub = '''char *stpcpy(char *__restrict__ dest, const char *__restrict__ src);
+          char *stpcpy(char *__restrict__ dest, const char *__restrict__ src)
           {
-            # KernelSU
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_MANUAL_HOOK=y"
-            # KPM — Kernel Plugin Module
-            # 4.19 不需要 backport set_memory.h（低于 4.19 才需要）
-            echo "CONFIG_KPM=y"
-            # SuSFS
-            echo "CONFIG_KSU_SUSFS=y"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
-            # manual hook 内核必须禁用 SUS_SU（仅 kprobe 内核可用）
-            echo "CONFIG_KSU_SUSFS_SUS_SU=n"
-            # KernelSU 0.9.5 使用 overlay mount，非 magic mount
-            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=n"
-            # KALLSYMS（KPM 必需）
-            echo "CONFIG_KALLSYMS=y"
-            echo "CONFIG_KALLSYMS_ALL=y"
-          } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
+          \twhile ((*dest++ = *src++) != '\\0')
+          \t\t/* nothing */;
+          \treturn --dest;
+          }
+          EXPORT_SYMBOL(stpcpy);
 
-      - name: Setup SukiSU-Ultra
+          '''
+          anchor = "#ifndef __HAVE_ARCH_STRCAT"
+          assert anchor in content, "anchor not found, need manual check"
+          assert "char *stpcpy" not in content, "stpcpy already defined, skip"
+          content = content.replace(anchor, stub + anchor, 1)
+          with open(path, "w") as f:
+              f.write(content)
+          print("stpcpy inserted")
+          EOF
+          grep -n "stpcpy" kernel/lib/string.c 2>/dev/null || grep -n "stpcpy" lib/string.c
+
+      # 完全用官方原版defconfig，不追加任何配置行
+      # PATH把工具链目录放在最后，避免裸名的gcc/ld/as被工具链自带的
+      # 同名文件顶替，导致host工具(scripts/dtc等)用错链接器
+      # HOSTCFLAGS=-fcommon 是关键：老dtc源码里全局变量沿用旧式"暂定定义"
+      # 写法，GCC10+/Clang11+默认-fno-common会让这类重复定义直接报错，
+      # 显式转回-fcommon是这个问题的标准解法，跟具体编译器版本无关
+      - name: Generate defconfig (stock, untouched)
         run: |
-          cd project
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
-              | bash -s builtin
-
-          # 回档到 2026-04-30 前（避免 5 月后的 4.19 不兼容新提交）
-          LAST_GOOD=$(cd KernelSU && git log --format="%H" --max-count=1 --before="2026-04-30T00:00:00")
-          if [ -n "$LAST_GOOD" ]; then
-            cd KernelSU && git checkout "$LAST_GOOD" && cd ..
-            echo "[KSU] 已回档: $(cd KernelSU && git log -1 --format='%h  %ci')"
-          fi
-
-          # SuSFS KernelSU 侧补丁
-          # builtin 分支可能已包含此补丁，--forward 跳过已应用的 hunk
-          cd KernelSU
-          patch -p1 --forward < /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
-              || echo "[SUSFS] KSU patch 已存在或不适用，继续..."
-          cd ..
-
-          git config --global user.email "bot@example.com"
-          git config --global user.name "bot"
-          git add .
-          git commit -m "ksu+kpm+susfs"
+          cd kernel
+          export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
+          make O=out ARCH=arm64 PYTHON=python3 CC=clang CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
 
       - name: Build kernel
         run: |
-          cd project
-          export PATH=$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/clang/bin:$PATH
-          make O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 \
-            ${{ env.KERNEL_DEFCONFIG }}
-          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1
+          cd kernel
+          export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
+          make -j$(nproc) O=out \
+            ARCH=arm64 \
+            PYTHON=python3 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            HOSTCFLAGS=-fcommon \
+            2>&1 | tee build.log
 
-      - name: Upload the kernel zip
+      - name: Upload kernel Image + build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Gauguin_4.19_KSU_KPM_SUSFS_${{ env.BUILD_TIME}}
+          name: gauguin-kernel-stock
           path: |
-            project/out/arch/arm64/boot/*
+            kernel/out/arch/arm64/boot/Image*
+            kernel/build.log
+          if-no-files-found: warn
