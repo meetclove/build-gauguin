@@ -70,23 +70,25 @@ jobs:
           key: gauguin-kernel
           max-size: 2G
 
-      - name: Download Android GCC 4.9 Toolchain
+      - name: Download Android Toolchain (aarch64-linux-android)
         run: |
-          echo "Downloading GCC 4.9 toolchain for aarch64..."
+          echo "Downloading aarch64-linux-android toolchain..."
           mkdir -p ${{ github.workspace }}/toolchain
           cd ${{ github.workspace }}/toolchain
           
-          # 使用 KudProject 的正确地址（可靠的预编译工具链）
-          echo "Cloning from KudProject (reliable prebuilt)..."
-          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9.git aarch64-linux-android-4.9
+          # 使用 KudProject 的正确预编译工具链
+          echo "Cloning from KudProject..."
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android.git aarch64-linux-android
           
           # 检查工具链是否存在
-          if [ ! -d "aarch64-linux-android-4.9/bin" ]; then
+          if [ ! -d "aarch64-linux-android/bin" ]; then
             echo "Error: Toolchain bin directory not found!"
+            echo "Available directories:"
+            ls -la aarch64-linux-android/
             exit 1
           fi
           
-          echo "${{ github.workspace }}/toolchain/aarch64-linux-android-4.9/bin" >> $GITHUB_PATH
+          echo "${{ github.workspace }}/toolchain/aarch64-linux-android/bin" >> $GITHUB_PATH
           
           echo "=== Toolchain Setup Complete ==="
           which aarch64-linux-android-gcc
@@ -107,9 +109,11 @@ jobs:
       - name: Verify Kernel Config
         run: |
           cd ${{ env.KERNEL_DIR }}
-          echo "=== Available Configs ==="
-          find arch/arm64/configs/ -name "*gauguin*" -type f
-          ls arch/arm64/configs/ | grep -i gauguin || echo "No gauguin configs found"
+          echo "=== Searching for defconfig files ==="
+          find arch/arm64/configs/ -name "*gauguin*" -o -name "*gauguinpro*" 2>/dev/null || true
+          echo ""
+          echo "=== All available configs ==="
+          ls -1 arch/arm64/configs/ | head -20
 
       - name: Configure Kernel
         run: |
@@ -121,7 +125,7 @@ jobs:
           
           echo "=== Kernel Config Generated ==="
           ls -lh out/.config
-          echo "Config file size and first 30 lines:"
+          echo "Config file contents (first 30 lines):"
           head -30 out/.config
 
       - name: Build Kernel
@@ -134,9 +138,10 @@ jobs:
           
           make -j$(nproc) O=out 2>&1 | tee build.log
           
+          echo ""
           echo "Build completed at: $(date)"
-          echo "=== Last 50 lines of build log ==="
-          tail -50 build.log
+          echo "=== Last 100 lines of build log ==="
+          tail -100 build.log
 
       - name: Check Build Output
         if: success()
@@ -210,6 +215,6 @@ jobs:
           echo "Kernel Branch: ${{ github.event.inputs.kernel_branch || 'gauguin-q-oss' }}"
           echo "Architecture: ${{ env.ARCH }}"
           echo "Defconfig: ${{ env.KERNEL_DEFCONFIG }}"
-          echo "Toolchain: GCC 4.9 (KudProject/aarch64-linux-android-4.9)"
+          echo "Toolchain: aarch64-linux-android (from KudProject)"
           echo "GitHub Actions Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           echo "==============================="
