@@ -65,11 +65,13 @@ jobs:
       # 继续往下编译会撞到的第二个坑：modpost给gsi_write_channel_scratch
       # 生成CRC版本符号时，跟lld的重定位处理不兼容，报
       # R_AARCH64_ABS32 cannot be used against symbol ...
-      # 官方作法是干脆不给这一个符号生成CRC版本(gauguin/lito平台社区已验证过的修复)
+      # 官方作法是干脆不给这一个符号生成CRC版本(gauguin/lito平台社区已验证过的修复)。
+      # 注意：参考fix原文用的是CRC_PFX宏，但gauguin-q-oss这份modpost.c里
+      # 没有这个宏、是直接写死"__crc_"字符串，已经对着真实源码改成匹配写法
       - name: Fix GSI symbol CRC versioning for lld compatibility
         run: |
           cd kernel
-          sed -i 's/if (is_crc) {/if (is_crc \&\& strcmp(symname + strlen(CRC_PFX), "gsi_write_channel_scratch")) {/' scripts/mod/modpost.c
+          sed -i 's/if (is_crc) {/if (is_crc \&\& strcmp(symname + strlen("__crc_"), "gsi_write_channel_scratch")) {/' scripts/mod/modpost.c
           grep -n "gsi_write_channel_scratch" scripts/mod/modpost.c
 
       # 第三个坑：clang 12会把某些sprintf(dest,"%s",str)优化成stpcpy调用，
