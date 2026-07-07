@@ -61,8 +61,6 @@ jobs:
           echo "=== Installed Tools ==="
           gcc --version
           make --version
-          bison --version
-          flex --version
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -76,23 +74,40 @@ jobs:
           mkdir -p ${{ github.workspace }}/toolchain
           cd ${{ github.workspace }}/toolchain
           
-          # 使用 KudProject 的正确预编译工具链
-          echo "Cloning from KudProject..."
-          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android.git aarch64-linux-android
-          
-          # 检查工具链是否存在
-          if [ ! -d "aarch64-linux-android/bin" ]; then
-            echo "Error: Toolchain bin directory not found!"
-            echo "Available directories:"
-            ls -la aarch64-linux-android/
-            exit 1
+          # 方式 1: 使用 Adrilaw 的预编译工具链（推荐）
+          echo "Trying Adrilaw prebuilt toolchain..."
+          if git clone --depth=1 https://github.com/Adrilaw/aarch64-linux-android-4.9-toolchain.git aarch64-linux-android 2>/dev/null; then
+            echo "✓ Adrilaw toolchain cloned successfully"
+          else
+            # 方式 2: 使用 JonasCardoso 的工具链
+            echo "Trying JonasCardoso toolchain..."
+            git clone --depth=1 https://github.com/JonasCardoso/Toolchain.git
+            cp -r Toolchain/aarch64-linux-android-4.9 aarch64-linux-android
           fi
           
-          echo "${{ github.workspace }}/toolchain/aarch64-linux-android/bin" >> $GITHUB_PATH
+          # 检查工具链
+          if [ ! -d "aarch64-linux-android/bin" ]; then
+            echo "✗ bin directory not found, checking structure..."
+            find . -name "aarch64-linux-android-gcc" -type f 2>/dev/null | head -5
+            
+            # 尝试查找 gcc 在根目录
+            if find aarch64-linux-android -name "aarch64-linux-android-gcc" -type f 2>/dev/null | grep -q .; then
+              TOOLCHAIN_BIN=$(find aarch64-linux-android -name "aarch64-linux-android-gcc" -type f | head -1 | xargs dirname)
+              echo "Found GCC at: $TOOLCHAIN_BIN"
+            else
+              echo "✗ aarch64-linux-android-gcc not found!"
+              ls -la aarch64-linux-android/
+              exit 1
+            fi
+          else
+            TOOLCHAIN_BIN="${{ github.workspace }}/toolchain/aarch64-linux-android/bin"
+          fi
+          
+          echo "$TOOLCHAIN_BIN" >> $GITHUB_PATH
           
           echo "=== Toolchain Setup Complete ==="
-          which aarch64-linux-android-gcc
-          aarch64-linux-android-gcc --version
+          which aarch64-linux-android-gcc || echo "GCC not in PATH yet"
+          $TOOLCHAIN_BIN/aarch64-linux-android-gcc --version
 
       - name: Clone Kernel Source
         run: |
@@ -109,10 +124,8 @@ jobs:
       - name: Verify Kernel Config
         run: |
           cd ${{ env.KERNEL_DIR }}
-          echo "=== Searching for defconfig files ==="
-          find arch/arm64/configs/ -name "*gauguin*" -o -name "*gauguinpro*" 2>/dev/null || true
-          echo ""
-          echo "=== All available configs ==="
+          echo "=== Searching for available defconfigs ==="
+          find arch/arm64/configs/ -type f -name "*" | grep -i gauguin || echo "No gauguin config found, listing first 20 configs:"
           ls -1 arch/arm64/configs/ | head -20
 
       - name: Configure Kernel
@@ -121,12 +134,15 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           
           echo "Configuring with ${{ env.KERNEL_DEFCONFIG }}..."
-          make O=out ${{ env.KERNEL_DEFCONFIG }}
+          make O=out ${{ env.KERNEL_DEFCONFIG }} || {
+            echo "✗ Failed to configure with ${{ env.KERNEL_DEFCONFIG }}"
+            echo "Available configs:"
+            ls arch/arm64/configs/
+            exit 1
+          }
           
           echo "=== Kernel Config Generated ==="
           ls -lh out/.config
-          echo "Config file contents (first 30 lines):"
-          head -30 out/.config
 
       - name: Build Kernel
         run: |
@@ -137,51 +153,41 @@ jobs:
           echo "Build start time: $(date)"
           
           make -j$(nproc) O=out 2>&1 | tee build.log
+          BUILD_RESULT=$?
           
           echo ""
           echo "Build completed at: $(date)"
-          echo "=== Last 100 lines of build log ==="
-          tail -100 build.log
+          
+          if [ $BUILD_RESULT -ne 0 ]; then
+            echo "✗ Build failed with exit code: $BUILD_RESULT"
+            echo "=== Last 200 lines of build log ==="
+            tail -200 build.log
+            exit $BUILD_RESULT
+          else
+            echo "✓ Build succeeded!"
+            tail -50 build.log
+          fi
 
       - name: Check Build Output
         if: success()
         run: |
           cd ${{ env.KERNEL_DIR }}
           echo "=== Build Artifacts ==="
-          ls -lh out/arch/arm64/boot/
+          ls -lh out/arch/arm64/boot/ || echo "boot directory not found"
           
-          # 检查关键文件
-          if [ -f out/arch/arm64/boot/Image ]; then
-            echo "✓ Kernel Image found"
-            file out/arch/arm64/boot/Image
-            ls -lh out/arch/arm64/boot/Image
-          else
-            echo "✗ Kernel Image NOT found - build may have failed"
-            exit 1
-          fi
-          
-          if [ -f out/arch/arm64/boot/Image.gz ]; then
-            echo "✓ Kernel Image.gz found"
-            file out/arch/arm64/boot/Image.gz
-            ls -lh out/arch/arm64/boot/Image.gz
-          fi
+          # 查找所有可能的内核镜像
+          find out/ -name "Image*" -type f 2>/dev/null || echo "No Image files found"
 
       - name: Upload Kernel Image
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: gauguin-kernel-image
-          path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image*
+          path: |
+            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image
+            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz
           retention-days: 30
-
-      - name: Upload DTB Files (if exists)
-        if: success()
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: gauguin-kernel-dtb
-          path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/dts/
-          retention-days: 30
+          if-no-files-found: warn
 
       - name: Upload Build Log
         if: always()
@@ -190,21 +196,6 @@ jobs:
           name: build-log-${{ github.run_number }}
           path: ${{ env.KERNEL_DIR }}/build.log
           retention-days: 7
-
-      - name: Create Release (on Tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image
-            ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz
-          body: |
-            Gauguin Kernel Build
-            Branch: ${{ github.event.inputs.kernel_branch || 'gauguin-q-oss' }}
-            Commit: ${{ github.sha }}
-            Build Time: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Summary
         if: always()
@@ -215,6 +206,6 @@ jobs:
           echo "Kernel Branch: ${{ github.event.inputs.kernel_branch || 'gauguin-q-oss' }}"
           echo "Architecture: ${{ env.ARCH }}"
           echo "Defconfig: ${{ env.KERNEL_DEFCONFIG }}"
-          echo "Toolchain: aarch64-linux-android (from KudProject)"
+          echo "Toolchain: aarch64-linux-android"
           echo "GitHub Actions Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           echo "==============================="
