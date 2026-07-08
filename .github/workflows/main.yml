@@ -134,12 +134,13 @@ jobs:
             KCFLAGS=-gdwarf-4 \
             2>&1 | tee build.log
 
-      - name: Upload kernel Image + build log
+      - name: Upload kernel Image + dtb + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gauguin-kernel-stock
           path: |
             kernel/out/arch/arm64/boot/Image*
+            kernel/out/arch/arm64/boot/dts/vendor/qcom/*.dtb
             kernel/build.log
           if-no-files-found: warn
