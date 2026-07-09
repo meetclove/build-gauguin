@@ -39,6 +39,22 @@ jobs:
           git clone --depth 1 --branch gauguin-q-oss \
             https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
 
+      # 官方开源包缺了这台设备真正的设备树(arch/arm64/boot/dts/vendor/)和
+      # nt36xxx触摸驱动文件夹——defconfig点了名要CONFIG_TOUCHSCREEN_NT36xxx_
+      # HOSTDL_SPI=y，但对应的driver目录在官方源码里根本不存在，dtbs也只会
+      # 编出apq8016/msm8996这些高通通用参考板，不是gauguin真机。
+      # 从Dhollmen那份已验证能正常开机、不会幽灵触控的仓库里，只搬这两块
+      # 缺失的内容过来，其余全部保持官方源码不动
+      - name: Supplement missing device tree and touch driver from Dhollmen
+        run: |
+          git clone --depth 1 https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin.git dhollmen-ref
+          mkdir -p kernel/arch/arm64/boot/dts/vendor
+          cp -r dhollmen-ref/arch/arm64/boot/dts/vendor/* kernel/arch/arm64/boot/dts/vendor/
+          cp -r dhollmen-ref/drivers/input/touchscreen/nt36xxx kernel/drivers/input/touchscreen/
+          rm -rf dhollmen-ref
+          find kernel/arch/arm64/boot/dts/vendor -iname "gauguin*" 
+          test -d kernel/drivers/input/touchscreen/nt36xxx && echo "nt36xxx驱动已补上"
+
       # ZyCromerZ的clang11/gcc4.9都是release附件，不在git仓库内容里，
       # 必须下载release tarball解压，不能直接git clone
       # 换成AOSP官方clang r416183b + 配套gcc4.9（LineageOS镜像，
@@ -127,6 +143,13 @@ jobs:
       # HOSTCFLAGS=-fcommon 是关键：老dtc源码里全局变量沿用旧式"暂定定义"
       # 写法，GCC10+/Clang11+默认-fno-common会让这类重复定义直接报错，
       # 显式转回-fcommon是这个问题的标准解法，跟具体编译器版本无关
+      # 指定只打包gauguin-sm6350这一个dtb，不然$(dtb-y)兜底逻辑会把
+      # apq8016/msm8996/sdm845这些不相关的高通参考板全部一起拼进Image-dtb
+      - name: Point dtb selection at gauguin-sm6350 only
+        run: |
+          cd kernel
+          echo 'CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES="gauguin-sm6350"' >> arch/arm64/configs/vendor/gauguin_user_defconfig
+
       - name: Generate defconfig (stock, untouched)
         run: |
           cd kernel
@@ -187,11 +210,10 @@ jobs:
           supported.patchlevels=
           '; }
 
-          # BLOCK指向高通设备通用的boot分区by-name路径；IS_SLOT_DEVICE=0是
-          # 假设非A/B双分区设备——如果你这台实际是A/B(fastboot getvar
-          # current-slot 有输出)，这里要改成1，AK3会自动加_a/_b后缀
+          # BLOCK指向高通设备通用的boot分区by-name路径；虚拟AB设备boot分区
+          # 同样带_a/_b后缀，IS_SLOT_DEVICE=1让AK3自动探测当前slot加后缀
           BLOCK=/dev/block/bootdevice/by-name/boot;
-          IS_SLOT_DEVICE=0;
+          IS_SLOT_DEVICE=1;
           RAMDISK_COMPRESSION=auto;
           PATCH_VBMETA_FLAG=auto;
 
