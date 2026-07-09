@@ -14,7 +14,24 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y bison flex libssl-dev bc libncurses-dev \
-            build-essential libelf-dev rsync
+            build-essential libelf-dev rsync ccache
+
+      # ccache本身随runner一次性容器消失，靠actions/cache跨run持久化，
+      # 不然每次都是空缓存，等于没开。restore-keys保证就算完全没命中
+      # 也能捡上一次的缓存当基础，越跑应该越快
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-gauguin-${{ github.run_id }}
+          restore-keys: |
+            ccache-gauguin-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=5G
+          ccache --set-config=cache_dir=$HOME/.ccache
+          ccache -z
 
       # Android 10对应分支，已用 git ls-remote 确认存在
       - name: Checkout Xiaomi official kernel source (gauguin-q-oss)
@@ -114,9 +131,9 @@ jobs:
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
-          make O=out ARCH=arm64 PYTHON=python3 CC=clang CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
+          make O=out ARCH=arm64 PYTHON=python3 CC="ccache clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
 
-      - name: Build kernel
+      - name: Build kernel (Image + dtb + concatenated Image-dtb)
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
@@ -124,23 +141,101 @@ jobs:
           # 配套的老版本as解析不了(.loc文件编号从0开始等新语法)，报
           # "file number less than one"/"junk at end of line"。强制clang
           # 用旧版as能理解的DWARF4格式，这是全局性修复，不是针对某一个文件
+          # 显式加上 dtbs Image-dtb 两个target，不管defconfig里
+          # CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE开没开，都保证两种产物都有：
+          # 单独的.dtb文件 + kernel内核和dtb拼接好的Image-dtb
           make -j$(nproc) O=out \
             ARCH=arm64 \
             PYTHON=python3 \
-            CC=clang \
+            CC="ccache clang" \
             CROSS_COMPILE=aarch64-linux-android- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon \
             KCFLAGS=-gdwarf-4 \
+            dtbs Image-dtb \
             2>&1 | tee build.log
+          ccache -s
 
-      - name: Upload kernel Image + dtb + build log
+      - name: List all boot-related build outputs (diagnostic)
+        run: |
+          find kernel/out/arch/arm64/boot -type f | sort
+
+      # AK3：用官方模板，自己的脚本会去解包当前boot分区、换内核(和dtb)、
+      # 重新打包写回去，不用我们自己手动拆boot.img/配对dtb
+      - name: Checkout AnyKernel3 template
+        run: |
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/ramdisk ak3/patch ak3/.git
+
+      - name: Write anykernel.sh for gauguin/gauguinpro
+        run: |
+          cat > ak3/anykernel.sh << 'EOF'
+          ### AnyKernel3 Ramdisk Mod Script for gauguin/gauguinpro
+          ## 纯净官方源码编译，不含KernelSU/任何patch
+
+          properties() { '
+          kernel.string=gauguin-q-oss stock build
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=gauguin
+          device.name2=gauguinpro
+          device.name3=gauguininpro
+          supported.versions=
+          supported.patchlevels=
+          '; }
+
+          # BLOCK指向高通设备通用的boot分区by-name路径；IS_SLOT_DEVICE=0是
+          # 假设非A/B双分区设备——如果你这台实际是A/B(fastboot getvar
+          # current-slot 有输出)，这里要改成1，AK3会自动加_a/_b后缀
+          BLOCK=/dev/block/bootdevice/by-name/boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          dump_boot;
+          write_boot;
+          EOF
+          cat ak3/anykernel.sh
+
+      # 优先用拼好的Image-dtb（内核+设备树已经在编译时拼在一起了，
+      # AK3直接当kernel整体处理）；如果因为某些defconfig组合没生成，
+      # 就退回单独的Image+dtb两个文件一起放，AK3自己会识别dtb文件名拼上
+      - name: Stage kernel artifacts into AnyKernel3 zip
+        run: |
+          BOOT_OUT=kernel/out/arch/arm64/boot
+          if [ -f "$BOOT_OUT/Image-dtb" ]; then
+            echo "使用拼接好的 Image-dtb"
+            cp "$BOOT_OUT/Image-dtb" ak3/Image
+          else
+            echo "没有Image-dtb，退回单独Image+dtb"
+            cp "$BOOT_OUT/Image" ak3/Image
+            DTB=$(find "$BOOT_OUT/dts" -name "gauguin*.dtb" | head -1)
+            if [ -n "$DTB" ]; then
+              cp "$DTB" ak3/dtb
+            else
+              echo "警告：连单独的dtb都没找到，检查上一步的文件列表输出"
+            fi
+          fi
+          ls -la ak3/
+
+      - name: Package AnyKernel3 flashable zip
+        run: |
+          cd ak3
+          zip -r9 ../gauguin-kernel-AK3.zip . -x ".git*"
+          cd ..
+          ls -la gauguin-kernel-AK3.zip
+
+      - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-stock
+          name: gauguin-kernel-AK3
           path: |
-            kernel/out/arch/arm64/boot/Image*
-            kernel/out/arch/arm64/boot/dts/vendor/qcom/*.dtb
+            gauguin-kernel-AK3.zip
             kernel/build.log
           if-no-files-found: warn
