@@ -11,7 +11,7 @@ jobs:
 
       - name: Setup Configuration
         run: |
-          echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> $GITHUB_ENV
+          echo "KERNEL_DEFCONFIG=vendor/gauguin_defconfig" >> $GITHUB_ENV
 
       - name: Setup build kernel environment
         run: |
@@ -28,83 +28,7 @@ jobs:
       - name: Checkout Kernel Source
         run: |
           git clone --depth=1 --branch 11.0-oss https://github.com/meetclove/kernel_xiaomi_gauguin project
-          rm -rf project/drivers/kernelsu
-
-      - name: Clone SuSFS patches
-        # 克隆 susfs4ksu 的 kernel-4.19 分支，用于后续两步打 patch
-        # 分离此步骤以便更清晰地追踪问题
-        run: |
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
-              -b kernel-4.19 /tmp/susfs4ksu
-          echo "[SUSFS] 克隆完成，版本: $(cat /tmp/susfs4ksu/VERSION 2>/dev/null || echo 'unknown')"
-
-      - name: Setup Patches
-        run: |
-          cd project
-
-          # ── KernelSU manual hook 补丁 ─────────────────────────────
-          git apply ../ksu_hooks_sukisu_4.19.patch
-
-          # ── SuSFS 内核侧补丁 ──────────────────────────────────────
-          # 1. 复制 susfs 源文件进内核
-          cp /tmp/susfs4ksu/kernel_patches/fs/susfs.c fs/
-          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-          # susfs_def.h 是 fdinfo.c 等文件 include 的独立定义头，必须一并复制
-          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
-          echo "[SUSFS] susfs.c / susfs.h / susfs_def.h 已复制"
-
-          # 2. 应用内核集成补丁（向 fs/namei.c 等添加 susfs hook 点）
-          patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch \
-              || echo "[SUSFS] 部分 hunk 失败，已继续（可能是已应用过或内核代码有差异）"
-
-          # ── defconfig ─────────────────────────────────────────────
-          {
-            # KernelSU
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_MANUAL_HOOK=y"
-            # KPM — Kernel Plugin Module
-            # 4.19 不需要 backport set_memory.h（低于 4.19 才需要）
-            echo "CONFIG_KPM=y"
-            # SuSFS
-            echo "CONFIG_KSU_SUSFS=y"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
-            # manual hook 内核必须禁用 SUS_SU（仅 kprobe 内核可用）
-            echo "CONFIG_KSU_SUSFS_SUS_SU=n"
-            # KernelSU 0.9.5 使用 overlay mount，非 magic mount
-            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=n"
-            # KALLSYMS（KPM 必需）
-            echo "CONFIG_KALLSYMS=y"
-            echo "CONFIG_KALLSYMS_ALL=y"
-          } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
-
-      - name: Setup SukiSU-Ultra
-        run: |
-          cd project
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
-              | bash -s builtin
-
-          # 回档到 2026-04-30 前（避免 5 月后的 4.19 不兼容新提交）
-          LAST_GOOD=$(cd KernelSU && git log --format="%H" --max-count=1 --before="2026-04-30T00:00:00")
-          if [ -n "$LAST_GOOD" ]; then
-            cd KernelSU && git checkout "$LAST_GOOD" && cd ..
-            echo "[KSU] 已回档: $(cd KernelSU && git log -1 --format='%h  %ci')"
-          fi
-
-          # SuSFS KernelSU 侧补丁
-          # builtin 分支可能已包含此补丁，--forward 跳过已应用的 hunk
-          cd KernelSU
-          patch -p1 --forward < /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
-              || echo "[SUSFS] KSU patch 已存在或不适用，继续..."
-          cd ..
-
-          git config --global user.email "bot@example.com"
-          git config --global user.name "bot"
-          git add .
-          git commit -m "ksu+kpm+susfs"
-
+ 
       - name: Build kernel
         run: |
           cd project
