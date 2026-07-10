@@ -138,7 +138,7 @@ jobs:
             ARCH=arm64 PYTHON=python3 CC="ccache clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS=-gdwarf-4 \
-            arch/arm64/boot/dts/vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
+            vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
           ccache -s
 
       - name: Concatenate Image + dtb manually
