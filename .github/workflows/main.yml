@@ -11,7 +11,7 @@ jobs:
 
       - name: Setup Configuration
         run: |
-          echo "KERNEL_DEFCONFIG=vendor/gauguin_defconfig" >> $GITHUB_ENV
+          echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> $GITHUB_ENV
 
       - name: Setup build kernel environment
         run: |
