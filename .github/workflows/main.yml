@@ -34,17 +34,21 @@ jobs:
           ccache -z
 
       # Android 10对应分支，已用 git ls-remote 确认存在
-      - name: Checkout Xiaomi official kernel source (gauguin-q-oss)
+      - name: Checkout Xiaomi official kernel source (gauguin-r-oss)
         run: |
-          git clone --depth 1 --branch gauguin-q-oss \
+          git clone --depth 1 --branch gauguin-r-oss \
             https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
 
       # 官方开源包缺了这台设备真正的设备树(arch/arm64/boot/dts/vendor/)和
       # nt36xxx触摸驱动文件夹——defconfig点了名要CONFIG_TOUCHSCREEN_NT36xxx_
       # HOSTDL_SPI=y，但对应的driver目录在官方源码里根本不存在，dtbs也只会
       # 编出apq8016/msm8996这些高通通用参考板，不是gauguin真机。
-      # 从Dhollmen那份已验证能正常开机、不会幽灵触控的仓库里，只搬这两块
-      # 缺失的内容过来，其余全部保持官方源码不动
+      # 从Dhollmen那份已验证能在安卓11正常开机、不会幽灵触控的仓库里，只搬
+      # 这两块缺失的内容过来，其余全部保持官方源码不动。
+      # 注意：Dhollmen那份vendor/qcom/Makefile是多设备合集(kona/lagoon等
+      # 全部用dtb-y无条件塞在一起，不受defconfig限制)，原样搬会把不相关
+      # 设备也一起编进去、遇到它们自己的语法错误就炸——搬完之后把这个
+      # Makefile替换成只留gauguin-sm6350这一行
       - name: Supplement missing device tree and touch driver from Dhollmen
         run: |
           git clone --depth 1 https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin.git dhollmen-ref
@@ -52,7 +56,8 @@ jobs:
           cp -r dhollmen-ref/arch/arm64/boot/dts/vendor/* kernel/arch/arm64/boot/dts/vendor/
           cp -r dhollmen-ref/drivers/input/touchscreen/nt36xxx kernel/drivers/input/touchscreen/
           rm -rf dhollmen-ref
-          find kernel/arch/arm64/boot/dts/vendor -iname "gauguin*" 
+          echo 'dtb-y += gauguin-sm6350.dtb' > kernel/arch/arm64/boot/dts/vendor/qcom/Makefile
+          cat kernel/arch/arm64/boot/dts/vendor/qcom/Makefile
           test -d kernel/drivers/input/touchscreen/nt36xxx && echo "nt36xxx驱动已补上"
 
       # ZyCromerZ的clang11/gcc4.9都是release附件，不在git仓库内容里，
