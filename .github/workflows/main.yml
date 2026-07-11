@@ -42,8 +42,9 @@ jobs:
 
       - name: Checkout kernel source (DtHnAme, 11-1 branch, matches 4.19.113)
         run: |
-          git clone --depth 1 --branch 11-1 \
+          git clone --depth 1 --recurse-submodules --shallow-submodules --branch 11-1 \
             https://github.com/DtHnAme/kernel_xiaomi_gauguin.git kernel
+          find kernel/scripts/dtc-aosp -maxdepth 2
 
       - name: Download AOSP Clang r416183b toolchain
         run: |
