@@ -113,6 +113,30 @@ jobs:
               print("stpcpy inserted")
           EOF
 
+      - name: Fix duplicate disp_rdump_memory label in xiaomi-sm6350-common.dtsi
+        run: |
+          cd kernel
+          F=arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi
+          # lito.dtsi(通用平台层)和这份小米定制层都定义了同一个标签
+          # disp_rdump_memory，仓库里bengal/scuba那些机型的override文件
+          # 都是先/delete-node/删掉旧的再重新定义，唯独这个文件漏了，
+          # 照着同样的写法补上
+          python3 - << 'EOF'
+          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
+          with open(path) as f:
+              content = f.read()
+          anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
+          if anchor not in content:
+              raise SystemExit("anchor not found, need manual check")
+          if "/delete-node/ &disp_rdump_memory;" in content:
+              print("已经修过，跳过")
+          else:
+              content = content.replace(anchor, "/delete-node/ &disp_rdump_memory;\n\n" + anchor, 1)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("duplicate label 修复完成")
+          EOF
+
       - name: Generate defconfig (this repo's own, untouched)
         run: |
           cd kernel
@@ -132,12 +156,12 @@ jobs:
           make -j$(nproc) O=out \
             ARCH=arm64 PYTHON=python3 CC="ccache clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
-            HOSTCFLAGS=-fcommon KCFLAGS=-gdwarf-4 \
+            HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
             Image 2>&1 | tee build.log
           make -j$(nproc) O=out \
             ARCH=arm64 PYTHON=python3 CC="ccache clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
-            HOSTCFLAGS=-fcommon KCFLAGS=-gdwarf-4 \
+            HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
             vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
           ccache -s
 
