@@ -40,9 +40,9 @@ jobs:
           ccache --set-config=cache_dir=$HOME/.ccache
           ccache -z
 
-      - name: Checkout kernel source (DtHnAme, 11.0-oss)
+      - name: Checkout kernel source (DtHnAme, 11-1 branch, matches 4.19.113)
         run: |
-          git clone --depth 1 --branch 11.0-oss \
+          git clone --depth 1 --branch 11-1 \
             https://github.com/DtHnAme/kernel_xiaomi_gauguin.git kernel
 
       - name: Download AOSP Clang r416183b toolchain
@@ -141,7 +141,7 @@ jobs:
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
-          make O=out ARCH=arm64 PYTHON=python3 CC="ccache clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
+          make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
           grep "CONFIG_ARCH_LITO\|CONFIG_ARCH_LAGOON" out/.config
 
       # 只点名build Image和gauguin-sm6350.dtb这一个具体文件，不用broad的
@@ -154,12 +154,12 @@ jobs:
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make -j$(nproc) O=out \
-            ARCH=arm64 PYTHON=python3 CC="ccache clang" \
+            ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
             Image 2>&1 | tee build.log
           make -j$(nproc) O=out \
-            ARCH=arm64 PYTHON=python3 CC="ccache clang" \
+            ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
             vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
