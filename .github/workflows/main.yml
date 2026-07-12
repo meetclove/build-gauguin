@@ -1,17 +1,22 @@
-name: Build Gauguin Kernel (DtHnAme complete source, clean/stock)
+name: Build Gauguin Kernel (DtHnAme + KernelSU v0.9.5)
 
-# 纯净编译，不集成KernelSU、不打任何patch，先确认这个能编译过、
-# 刷进去能正常开机，再考虑后面叠加KSU的事
+# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113，已实测
+# 编译成功、正常开机、且没有复现幽灵触控)
 #
-# 源码换成 DtHnAme/kernel_xiaomi_gauguin (11.0-oss分支)：
-# - 内核版本字符串里的编译者签名(dthname@archlinux, clang 12.0.0,
-#   2021-06-23)跟这个GitHub账号对得上，这份源码大概率就是实际在跑的
-#   移植系统内核的真实来源
-# - 已核实这份仓库自带完整的 arch/arm64/boot/dts/vendor/ 设备树和
-#   nt36xxx触摸驱动，不像官方Xiaomi_Kernel_OpenSource那样缺失
-# - 关键点：gauguin-sm6350.dtb在这份源码里是挂在CONFIG_ARCH_LAGOON下面
-#   (不是CONFIG_ARCH_LITO)，这份仓库自己的defconfig两个都开了，跟官方
-#   defconfig对不上——这也是之前拼官方源码那条路一直卡住的原因之一
+# 本次在"纯净编译"基础上新增：
+# 1. 原版KernelSU v0.9.5手动hook集成（非SukiSU Ultra——按要求永久不用）
+# 2. 内核版本字符串精简：去掉编译工具链信息和CI机器痕迹
+#
+# 版本字符串各部分来源，方便你自己后续调整：
+#   "4.19.113-perf"        <- arch/arm64/configs/vendor/gauguin_user_defconfig
+#                              里的 CONFIG_LOCALVERSION="-perf"
+#   "-gXXXXXXX-dirty" 后缀  <- scripts/setlocalversion 的git自动追加，
+#                              本次通过 CONFIG_LOCALVERSION_AUTO=n 关掉
+#   "(user@host)"           <- KBUILD_BUILD_USER / KBUILD_BUILD_HOST
+#                              环境变量，见下面Build kernel步骤
+#   "(编译器信息)"           <- scripts/mkcompile_h 里 LINUX_COMPILER
+#                              那一行，本次patch成固定的"GNU C"
+#   "#1 SMP PREEMPT 时间"    <- 保留原样不动，就是实际编译时间
 
 on:
   workflow_dispatch:
@@ -20,6 +25,12 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
+      # 本仓库存放 patches/ 目录下的5个KernelSU hook补丁
+      - name: Checkout this repo (KSU patches live here)
+        uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -30,9 +41,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-gauguin-dthname-${{ github.run_id }}
+          key: ccache-gauguin-dthname-ksu-${{ github.run_id }}
           restore-keys: |
-            ccache-gauguin-dthname-
+            ccache-gauguin-dthname-ksu-
 
       - name: Configure ccache
         run: |
@@ -44,7 +55,6 @@ jobs:
         run: |
           git clone --depth 1 --recurse-submodules --shallow-submodules --branch 11-1 \
             https://github.com/DtHnAme/kernel_xiaomi_gauguin.git kernel
-          find kernel/scripts/dtc-aosp -maxdepth 2
 
       - name: Download AOSP Clang r416183b toolchain
         run: |
@@ -55,8 +65,6 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git toolchain/gcc49
 
-      # 以下几个修复都是工具链/构建环境层面的坑，跟具体用哪份源码无关，
-      # 之前在官方源码上验证过，这里原样保留
       - name: Fix python2 syntax in scripts/gcc-wrapper.py
         run: |
           cd kernel
@@ -75,19 +83,15 @@ jobs:
         run: |
           cd kernel
           sed -i 's|CLANG_FLAGS\t+= --prefix=$(GCC_TOOLCHAIN_DIR)$|CLANG_FLAGS\t+= --prefix=$(GCC_TOOLCHAIN_DIR)$(notdir $(CROSS_COMPILE))|' Makefile
-          grep -n "prefix=\$(GCC_TOOLCHAIN_DIR)" Makefile
 
       - name: Fix GSI symbol CRC versioning for lld compatibility
         run: |
           cd kernel
           if grep -q "if (is_crc) {" scripts/mod/modpost.c; then
             sed -i 's/if (is_crc) {/if (is_crc \&\& strcmp(symname + strlen("__crc_"), "gsi_write_channel_scratch")) {/' scripts/mod/modpost.c
-            grep -n "gsi_write_channel_scratch" scripts/mod/modpost.c
-          else
-            echo "is_crc写法跟预期不一样，这份源码可能已经自带处理，跳过"
           fi
 
-      - name: Implement stpcpy for Clang 12 libcall optimization
+      - name: Implement stpcpy for Clang 12 libcall optimization (if missing)
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -117,11 +121,6 @@ jobs:
       - name: Fix duplicate disp_rdump_memory label in xiaomi-sm6350-common.dtsi
         run: |
           cd kernel
-          F=arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi
-          # lito.dtsi(通用平台层)和这份小米定制层都定义了同一个标签
-          # disp_rdump_memory，仓库里bengal/scuba那些机型的override文件
-          # 都是先/delete-node/删掉旧的再重新定义，唯独这个文件漏了，
-          # 照着同样的写法补上
           python3 - << 'EOF'
           path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
           with open(path) as f:
@@ -138,22 +137,70 @@ jobs:
               print("duplicate label 修复完成")
           EOF
 
-      - name: Generate defconfig (this repo's own, untouched)
+      # 版本字符串精简第一步：编译器信息那一整段改成固定的"GNU C"，
+      # 不再显示clang具体版本/googlesource链接这些暴露CI构建痕迹的内容。
+      # 想改成别的字符串，就编这一行的双引号里面那部分
+      - name: Simplify LINUX_COMPILER string in scripts/mkcompile_h
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          path = "scripts/mkcompile_h"
+          with open(path) as f:
+              content = f.read()
+          old = '''echo \\#define LINUX_COMPILER \\"`$CC -v 2>&1 | grep ' version ' | sed 's/[[:space:]]*$//'`\\"'''
+          new = 'echo \\#define LINUX_COMPILER \\"GNU C\\"'
+          if old not in content:
+              raise SystemExit("anchor not found, need manual check")
+          content = content.replace(old, new, 1)
+          with open(path, "w") as f:
+              f.write(content)
+          print("LINUX_COMPILER 已改成固定字符串")
+          EOF
+          grep -n "LINUX_COMPILER" scripts/mkcompile_h
+
+      # 原版KernelSU，官方文档写明1.0之后彻底不支持非GKI，必须用v0.9.5这个tag
+      - name: Integrate original KernelSU v0.9.5
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+
+      # 5个hook补丁，已经对着这份DtHnAme 11-1源码重新验证过零fuzz应用
+      # (input.c那个patch context匹配到了不同行号但内容完全一致，同样通过)
+      - name: Apply KernelSU manual hook patches
+        run: |
+          cd kernel
+          for p in ../workflow-repo/patches/*.patch; do
+            echo "applying $p"
+            patch -p1 < "$p"
+          done
+
+      # CONFIG_KSU=y 启用root；CONFIG_LOCALVERSION_AUTO=n 关掉版本字符串
+      # 里git commit hash + dirty那段自动追加，配合上面mkcompile_h的改动，
+      # 最终效果是只保留 "4.19.113-perf" 这个干净前缀
+      - name: Apply defconfig fragment (KSU + version string)
+        run: |
+          cd kernel
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_LOCALVERSION_AUTO=n"
+          } >> arch/arm64/configs/vendor/gauguin_user_defconfig
+
+      - name: Generate defconfig
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
-          grep "CONFIG_ARCH_LITO\|CONFIG_ARCH_LAGOON" out/.config
+          grep "CONFIG_KSU\|CONFIG_LOCALVERSION" out/.config
 
-      # 只点名build Image和gauguin-sm6350.dtb这一个具体文件，不用broad的
-      # dtbs/Image-dtb target——CONFIG_ARCH_LAGOON底下还挂着好几个lagoon
-      # 自己的变体(lagoon-rumi/lagoon-mtp/lagoon-cdp...)，broad target
-      # 会把它们也一起编，其中任何一个有问题都会拖累整个编译，之前在
-      # Dhollmen源码上就撞过一次这个坑。精确点名只编我们要的这一个
+      # KBUILD_BUILD_USER/HOST：版本字符串里 (user@host) 那部分，改成跟
+      # 原作者一致的身份而不是GitHub Actions runner的机器名——
+      # 想换成别的，直接改这两个变量的值即可
       - name: Build kernel Image and gauguin-sm6350.dtb specifically
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
+          export KBUILD_BUILD_USER=dthname
+          export KBUILD_BUILD_HOST=archlinux
           make -j$(nproc) O=out \
             ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -173,8 +220,6 @@ jobs:
           if [ -f "$BOOT_OUT/Image" ] && [ -f "$DTB" ]; then
             cat "$BOOT_OUT/Image" "$DTB" > "$BOOT_OUT/Image-dtb"
             echo "拼接完成"
-          else
-            echo "警告：Image或dtb缺失，检查上面的build.log"
           fi
           find kernel/out/arch/arm64/boot -maxdepth 3 -type f | sort
 
@@ -187,10 +232,10 @@ jobs:
         run: |
           cat > ak3/anykernel.sh << 'EOF'
           ### AnyKernel3 Ramdisk Mod Script for gauguin/gauguinpro
-          ## DtHnAme完整源码编译，不含KernelSU/任何patch
+          ## DtHnAme 11-1源码 + 原版KernelSU v0.9.5
 
           properties() { '
-          kernel.string=gauguin DtHnAme 11.0-oss stock build
+          kernel.string=gauguin DtHnAme 11-1 + KernelSU v0.9.5
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -213,7 +258,6 @@ jobs:
           dump_boot;
           write_boot;
           EOF
-          cat ak3/anykernel.sh
 
       - name: Stage kernel artifacts into AnyKernel3 zip
         run: |
@@ -224,21 +268,19 @@ jobs:
             cp "$BOOT_OUT/Image" ak3/Image
             cp "$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb" ak3/dtb 2>/dev/null || true
           fi
-          ls -la ak3/
 
       - name: Package AnyKernel3 flashable zip
         run: |
           cd ak3
-          zip -r9 ../gauguin-kernel-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-KSU-AK3.zip . -x ".git*"
           cd ..
-          ls -la gauguin-kernel-AK3.zip
 
       - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-AK3
+          name: gauguin-kernel-KSU-AK3
           path: |
-            gauguin-kernel-AK3.zip
+            gauguin-kernel-KSU-AK3.zip
             kernel/build.log
           if-no-files-found: warn
