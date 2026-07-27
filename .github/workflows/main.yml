@@ -96,13 +96,31 @@ jobs:
           void * __attribute__((weak)) g_shost = 0;
           EOF
 
-      # 5. 精简版本字符串 & 集成 KernelSU (复用你的老流程)
+            # 5. 精简版本字符串 & 集成 KernelSU (复用你的老流程)
       - name: Simplify string and apply KSU
         run: |
           cd kernel
-          sed -i 's|echo \#define LINUX_COMPILER \"`$CC -v 2>&1 | grep '"'"' version '"'"' | sed '"'"'s/[[:space:]]*$$//'"'"'`\"|echo \#define LINUX_COMPILER \"GNU C\"|g' scripts/mkcompile_h
+          
+          # 使用最稳妥的 Python 还原对 LINUX_COMPILER 的精简
+          python3 - << 'EOF'
+          path = "scripts/mkcompile_h"
+          with open(path) as f:
+              content = f.read()
+          old = '''echo \\#define LINUX_COMPILER \\"`$CC -v 2>&1 | grep ' version ' | sed 's/[[:space:]]*$//'`\\"'''
+          new = 'echo \\#define LINUX_COMPILER \\"GNU C\\"'
+          if old in content:
+              content = content.replace(old, new, 1)
+              with open(path, "w") as f:
+                  f.write(content)
+          EOF
+          
+          # 集成 KernelSU
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
-          for p in ../workflow-repo/patches/*.patch; do patch -p1 < "$p" || true; done
+          
+          # 安全应用补丁 (防止没补丁时报错)
+          if ls ../workflow-repo/patches/*.patch >/dev/null 2>&1; then
+            for p in ../workflow-repo/patches/*.patch; do patch -p1 < "$p" || true; done
+          fi
 
       # 6. 核心动作：注入并生效你提取出的完美 .config
       - name: Inject Custom Extracted .config
