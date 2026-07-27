@@ -33,6 +33,35 @@ jobs:
           ccache -z
 
       # 1. 切换为正确的 AOSPA 仓库和 Android 13 对应的 topaz 分支
+      - name: Fix compilation and linking errors
+        run: |
+          cd kernel
+          
+          echo ">>> 1. 修复 qpnp-power-on.c 链接报错 (弱符号劫持法)"
+          cat << 'EOF' >> drivers/input/misc/qpnp-power-on.c
+          
+          /* 修复未定义的符号引用 */
+          void __attribute__((weak)) ufs_enter_h8_disable(void) {}
+          int __attribute__((weak)) long_press = 0;
+          void * __attribute__((weak)) g_shost = 0;
+          EOF
+          
+          echo ">>> 2. 修复 dtsi 设备树重复标签报错 (复用原脚本逻辑)"
+          python3 - << 'EOF'
+          import os
+          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
+          if os.path.exists(path):
+              with open(path) as f:
+                  content = f.read()
+              anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
+              if anchor in content and "/delete-node/ &disp_rdump_memory;" not in content:
+                  content = content.replace(anchor, "/delete-node/ &disp_rdump_memory;\n\n" + anchor, 1)
+                  with open(path, "w") as f:
+                      f.write(content)
+                  print("duplicate label 修复完成")
+          EOF
+
+      
       - name: Checkout kernel source (AOSPA, topaz branch)
         run: |
           git clone --depth 1 --recurse-submodules --shallow-submodules --branch topaz \
