@@ -1,4 +1,22 @@
-name: Build Gauguin Kernel (AOSPA Topaz + Extracted Config + KSU)
+name: Build Gauguin Kernel (DtHnAme + KernelSU v0.9.5)
+
+# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113，已实测
+# 编译成功、正常开机、且没有复现幽灵触控)
+#
+# 本次在"纯净编译"基础上新增：
+# 1. 原版KernelSU v0.9.5手动hook集成（非SukiSU Ultra——按要求永久不用）
+# 2. 内核版本字符串精简：去掉编译工具链信息和CI机器痕迹
+#
+# 版本字符串各部分来源，方便你自己后续调整：
+#   "4.19.113-perf"        <- arch/arm64/configs/vendor/gauguin_user_defconfig
+#                              里的 CONFIG_LOCALVERSION="-perf"
+#   "-gXXXXXXX-dirty" 后缀  <- scripts/setlocalversion 的git自动追加，
+#                              本次通过 CONFIG_LOCALVERSION_AUTO=n 关掉
+#   "(user@host)"           <- KBUILD_BUILD_USER / KBUILD_BUILD_HOST
+#                              环境变量，见下面Build kernel步骤
+#   "(编译器信息)"           <- scripts/mkcompile_h 里 LINUX_COMPILER
+#                              那一行，本次patch成固定的"GNU C"
+#   "#1 SMP PREEMPT 时间"    <- 保留原样不动，就是实际编译时间
 
 on:
   workflow_dispatch:
@@ -7,7 +25,8 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout this repo (存放 .config 和 patches)
+      # 本仓库存放 patches/ 目录下的5个KernelSU hook补丁
+      - name: Checkout this repo (KSU patches live here)
         uses: actions/checkout@v4
         with:
           path: workflow-repo
@@ -16,15 +35,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y bison flex libssl-dev bc libncurses-dev \
-            build-essential libelf-dev rsync ccache zip unzip
+            build-essential libelf-dev rsync ccache
 
       - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-gauguin-topaz-${{ github.run_id }}
+          key: ccache-gauguin-dthname-ksu-${{ github.run_id }}
           restore-keys: |
-            ccache-gauguin-topaz-
+            ccache-gauguin-dthname-ksu-
 
       - name: Configure ccache
         run: |
@@ -32,11 +51,10 @@ jobs:
           ccache --set-config=cache_dir=$HOME/.ccache
           ccache -z
 
-      # 【核心换血】拉取 AOSPA 的 Android 13 (topaz) 分支
-      - name: Checkout kernel source (AOSPA, topaz branch)
+      - name: Checkout kernel source (DtHnAme, 11-1 branch, matches 4.19.113)
         run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules --branch topaz \
-            https://github.com/aospa-gauguin/kernel_xiaomi_gauguin.git kernel
+          git clone --depth 1 --recurse-submodules --shallow-submodules --branch 11-1 \
+            https://github.com/meetclove/kernel_xiaomi_gauguin.git kernel
 
       - name: Download AOSP Clang r416183b toolchain
         run: |
@@ -73,23 +91,55 @@ jobs:
             sed -i 's/if (is_crc) {/if (is_crc \&\& strcmp(symname + strlen("__crc_"), "gsi_write_channel_scratch")) {/' scripts/mod/modpost.c
           fi
 
-      - name: Fix duplicate disp_rdump_memory label in dtsi (Xiaomi bug)
+      - name: Implement stpcpy for Clang 12 libcall optimization (if missing)
         run: |
           cd kernel
           python3 - << 'EOF'
-          import os
-          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
-          if os.path.exists(path):
-              with open(path) as f:
-                  content = f.read()
-              anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
-              if anchor in content and "/delete-node/ &disp_rdump_memory;" not in content:
-                  content = content.replace(anchor, "/delete-node/ &disp_rdump_memory;\n\n" + anchor, 1)
-                  with open(path, "w") as f:
-                      f.write(content)
-                  print("duplicate label 修复完成")
+          path = "lib/string.c"
+          with open(path) as f:
+              content = f.read()
+          if "char *stpcpy" in content:
+              print("stpcpy已经存在，跳过")
+          else:
+              stub = ("char *stpcpy(char *__restrict__ dest, const char *__restrict__ src);\n"
+                      "char *stpcpy(char *__restrict__ dest, const char *__restrict__ src)\n"
+                      "{\n"
+                      "\twhile ((*dest++ = *src++) != '\\0')\n"
+                      "\t\t/* nothing */;\n"
+                      "\treturn --dest;\n"
+                      "}\n"
+                      "EXPORT_SYMBOL(stpcpy);\n"
+                      "\n")
+              anchor = "#ifndef __HAVE_ARCH_STRCAT"
+              assert anchor in content, "anchor not found, need manual check"
+              content = content.replace(anchor, stub + anchor, 1)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("stpcpy inserted")
           EOF
 
+      - name: Fix duplicate disp_rdump_memory label in xiaomi-sm6350-common.dtsi
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
+          with open(path) as f:
+              content = f.read()
+          anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
+          if anchor not in content:
+              raise SystemExit("anchor not found, need manual check")
+          if "/delete-node/ &disp_rdump_memory;" in content:
+              print("已经修过，跳过")
+          else:
+              content = content.replace(anchor, "/delete-node/ &disp_rdump_memory;\n\n" + anchor, 1)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("duplicate label 修复完成")
+          EOF
+
+      # 版本字符串精简第一步：编译器信息那一整段改成固定的"GNU C"，
+      # 不再显示clang具体版本/googlesource链接这些暴露CI构建痕迹的内容。
+      # 想改成别的字符串，就编这一行的双引号里面那部分
       - name: Simplify LINUX_COMPILER string in scripts/mkcompile_h
         run: |
           cd kernel
@@ -99,61 +149,65 @@ jobs:
               content = f.read()
           old = '''echo \\#define LINUX_COMPILER \\"`$CC -v 2>&1 | grep ' version ' | sed 's/[[:space:]]*$//'`\\"'''
           new = 'echo \\#define LINUX_COMPILER \\"GNU C\\"'
-          if old in content:
-              content = content.replace(old, new, 1)
-              with open(path, "w") as f:
-                  f.write(content)
-          print("LINUX_COMPILER string simplified")
+          if old not in content:
+              raise SystemExit("anchor not found, need manual check")
+          content = content.replace(old, new, 1)
+          with open(path, "w") as f:
+              f.write(content)
+          print("LINUX_COMPILER 已改成固定字符串")
           EOF
+          grep -n "LINUX_COMPILER" scripts/mkcompile_h
 
+      # 原版KernelSU，官方文档写明1.0之后彻底不支持非GKI，必须用v0.9.5这个tag
       - name: Integrate original KernelSU v0.9.5
         run: |
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
 
+      # 5个hook补丁，已经对着这份DtHnAme 11-1源码重新验证过零fuzz应用
+      # (input.c那个patch context匹配到了不同行号但内容完全一致，同样通过)
       - name: Apply KernelSU manual hook patches
         run: |
           cd kernel
-          if [ -d "../workflow-repo/patches" ] && [ "$(ls -A ../workflow-repo/patches/*.patch 2>/dev/null)" ]; then
-            for p in ../workflow-repo/patches/*.patch; do
-              echo "applying $p"
-              patch -p1 < "$p" || true
-            done
-          fi
+          for p in ../workflow-repo/patches/*.patch; do
+            echo "applying $p"
+            patch -p1 < "$p"
+          done
 
-      # 【灵魂注入】直接使用你提取的配置文件作为基础
-      - name: Inject Custom Extracted .config
+      # CONFIG_KSU=y 启用root；CONFIG_LOCALVERSION_AUTO=n 关掉版本字符串
+      # 里git commit hash + dirty那段自动追加，配合上面mkcompile_h的改动，
+      # 最终效果是只保留 "4.19.113-perf" 这个干净前缀
+      - name: Apply defconfig fragment (KSU + version string)
         run: |
           cd kernel
-          mkdir -p out
-          # 将你在仓库根目录放置的 gauguin_kernel_config.txt 复制为编译所需的 .config
-          cp ../workflow-repo/gauguin_kernel_config.txt out/.config
-          
-          # 追加必要参数: 开启KSU, 关闭字符串自动追加
           {
             echo "CONFIG_KSU=y"
             echo "CONFIG_LOCALVERSION_AUTO=n"
-          } >> out/.config
+          } >> arch/arm64/configs/vendor/gauguin_user_defconfig
 
-          export PATH="$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin:$PATH"
-          # 使用 olddefconfig 让 AOSPA 的新源码树自动接纳并适配你的完美配置
-          make O=out ARCH=arm64 PYTHON=python3 CC="ccache clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon olddefconfig
-
-      - name: Build kernel Image and dtb
+      - name: Generate defconfig
         run: |
           cd kernel
-          export PATH="$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin:$PATH"
-          export KBUILD_BUILD_USER=gauguin
-          export KBUILD_BUILD_HOST=topaz
-          
+          export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
+          make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
+          grep "CONFIG_KSU\|CONFIG_LOCALVERSION" out/.config
+
+      # KBUILD_BUILD_USER/HOST：版本字符串里 (user@host) 那部分，改成跟
+      # 原作者一致的身份而不是GitHub Actions runner的机器名——
+      # 想换成别的，直接改这两个变量的值即可
+      - name: Build kernel Image and gauguin-sm6350.dtb specifically
+        run: |
+          cd kernel
+          export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
+          export KBUILD_BUILD_USER=dthname
+          export KBUILD_BUILD_HOST=archlinux
           make -j$(nproc) O=out \
-            ARCH=arm64 PYTHON=python3 CC="ccache clang" \
+            ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
             Image 2>&1 | tee build.log
-            
           make -j$(nproc) O=out \
-            ARCH=arm64 PYTHON=python3 CC="ccache clang" \
+            ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
             vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
@@ -167,20 +221,21 @@ jobs:
             cat "$BOOT_OUT/Image" "$DTB" > "$BOOT_OUT/Image-dtb"
             echo "拼接完成"
           fi
+          find kernel/out/arch/arm64/boot -maxdepth 3 -type f | sort
 
       - name: Checkout AnyKernel3 template
         run: |
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
           rm -rf ak3/ramdisk ak3/patch ak3/.git
 
-      - name: Write anykernel.sh for gauguin
+      - name: Write anykernel.sh for gauguin/gauguinpro
         run: |
           cat > ak3/anykernel.sh << 'EOF'
           ### AnyKernel3 Ramdisk Mod Script for gauguin/gauguinpro
-          ## AOSPA Topaz + KSU v0.9.5
+          ## DtHnAme 11-1源码 + 原版KernelSU v0.9.5
 
           properties() { '
-          kernel.string=Gauguin AOSPA Topaz + KernelSU v0.9.5
+          kernel.string=gauguin DtHnAme 11-1 + KernelSU v0.9.5
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -204,7 +259,7 @@ jobs:
           write_boot;
           EOF
 
-      - name: Package AnyKernel3 flashable zip
+      - name: Stage kernel artifacts into AnyKernel3 zip
         run: |
           BOOT_OUT=kernel/out/arch/arm64/boot
           if [ -f "$BOOT_OUT/Image-dtb" ]; then
@@ -213,16 +268,19 @@ jobs:
             cp "$BOOT_OUT/Image" ak3/Image
             cp "$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb" ak3/dtb 2>/dev/null || true
           fi
+
+      - name: Package AnyKernel3 flashable zip
+        run: |
           cd ak3
-          zip -r9 ../gauguin-kernel-Topaz-KSU-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-KSU-AK3.zip . -x ".git*"
           cd ..
 
       - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-Topaz-KSU-AK3
+          name: gauguin-kernel-KSU-AK3
           path: |
-            gauguin-kernel-Topaz-KSU-AK3.zip
+            gauguin-kernel-KSU-AK3.zip
             kernel/build.log
           if-no-files-found: warn
