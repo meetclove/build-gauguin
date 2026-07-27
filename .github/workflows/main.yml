@@ -36,10 +36,14 @@ jobs:
           ccache --set-config=cache_dir=$HOME/.ccache
           ccache -z
 
-      - name: Checkout kernel source (DtHnAme, 11-1 branch, matches 4.19.113)
+      - name: Checkout TRUE A13 kernel source and sync to target commit
         run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules --branch 11-1 \
-            https://github.com/DtHnAme/kernel_xiaomi_gauguin.git kernel
+          # 克隆你嗅探到的包含该 commit 的仓库
+          git clone https://github.com/kumarshailesh-codes/android_kernel_xiaomi_gauguin-_5.4.git kernel
+          cd kernel
+          # 强制将代码状态回退到你手机提取到的那个精准节点
+          git checkout 8ef6226ac9af
+
 
       - name: Download AOSP Clang r416183b toolchain
         run: |
