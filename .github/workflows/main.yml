@@ -1,4 +1,4 @@
-name: Build Gauguin Kernel (AOSPA Topaz + Custom Config)
+name: Build Gauguin Kernel (Standard Defconfig)
 
 on:
   workflow_dispatch:
@@ -7,24 +7,19 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout this repo (存放 .config 和 patches)
-        uses: actions/checkout@v4
-        with:
-          path: workflow-repo
-
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y bison flex libssl-dev bc libncurses-dev \
-            build-essential libelf-dev rsync ccache
+            build-essential libelf-dev rsync ccache zip unzip
 
       - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-gauguin-aospa-${{ github.run_id }}
+          key: ccache-gauguin-standard-${{ github.run_id }}
           restore-keys: |
-            ccache-gauguin-aospa-
+            ccache-gauguin-standard-
 
       - name: Configure ccache
         run: |
@@ -32,48 +27,19 @@ jobs:
           ccache --set-config=cache_dir=$HOME/.ccache
           ccache -z
 
-      # 1. 切换为正确的 AOSPA 仓库和 Android 13 对应的 topaz 分支
-      - name: Fix compilation and linking errors
+      # 1. 拉取 AOSPA 官方 Android 13 分支源码
+      - name: Checkout AOSPA kernel source
         run: |
-          cd kernel
-          
-          echo ">>> 1. 修复 qpnp-power-on.c 链接报错 (弱符号劫持法)"
-          cat << 'EOF' >> drivers/input/misc/qpnp-power-on.c
-          
-          /* 修复未定义的符号引用 */
-          void __attribute__((weak)) ufs_enter_h8_disable(void) {}
-          int __attribute__((weak)) long_press = 0;
-          void * __attribute__((weak)) g_shost = 0;
-          EOF
-          
-          echo ">>> 2. 修复 dtsi 设备树重复标签报错 (复用原脚本逻辑)"
-          python3 - << 'EOF'
-          import os
-          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
-          if os.path.exists(path):
-              with open(path) as f:
-                  content = f.read()
-              anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
-              if anchor in content and "/delete-node/ &disp_rdump_memory;" not in content:
-                  content = content.replace(anchor, "/delete-node/ &disp_rdump_memory;\n\n" + anchor, 1)
-                  with open(path, "w") as f:
-                      f.write(content)
-                  print("duplicate label 修复完成")
-          EOF
-
-      
-      - name: Checkout kernel source (AOSPA, topaz branch)
-        run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules --branch topaz \
+          git clone --depth 1 --branch topaz \
             https://github.com/aospa-gauguin/kernel_xiaomi_gauguin.git kernel
 
-      # 2. 切换为提取信息中显示的 Proton Clang，以确保100%环境兼容
-      - name: Download Proton Clang 11 toolchain
+      # 2. 拉取 Proton Clang 编译链
+      - name: Download Proton Clang 11
         run: |
           git clone --depth 1 https://github.com/kdrag0n/proton-clang.git toolchain/proton-clang
-          toolchain/proton-clang/bin/clang --version
 
-      - name: Fix python2 syntax in scripts/gcc-wrapper.py
+      # 3. 修复 Ubuntu 22.04 默认 Python3 带来的脚本语法报错
+      - name: Fix python2 syntax in scripts
         run: |
           cd kernel
           if [ -f scripts/gcc-wrapper.py ]; then
@@ -87,70 +53,40 @@ jobs:
               scripts/gcc-wrapper.py
           fi
 
-      # 修正编译链前缀，适配 Proton Clang 路径
-      - name: Fix GCC_TOOLCHAIN_DIR prefix for Clang cross compilation
-        run: |
-          cd kernel
-          sed -i 's|CLANG_FLAGS\t+= --prefix=$(GCC_TOOLCHAIN_DIR)$|CLANG_FLAGS\t+= --prefix=$(GCC_TOOLCHAIN_DIR)$(notdir $(CROSS_COMPILE))|' Makefile
-
-      - name: Simplify LINUX_COMPILER string in scripts/mkcompile_h
+      # 4. 修复原源码中存在的设备树标签冲突 (源码本身的 Bug)
+      - name: Fix duplicate label in DTSI
         run: |
           cd kernel
           python3 - << 'EOF'
-          path = "scripts/mkcompile_h"
-          with open(path) as f:
-              content = f.read()
-          old = '''echo \\#define LINUX_COMPILER \\"`$CC -v 2>&1 | grep ' version ' | sed 's/[[:space:]]*$//'`\\"'''
-          new = 'echo \\#define LINUX_COMPILER \\"GNU C\\"'
-          if old in content:
-              content = content.replace(old, new, 1)
-              with open(path, "w") as f:
-                  f.write(content)
-              print("LINUX_COMPILER 已改成固定字符串")
+          import os
+          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
+          if os.path.exists(path):
+              with open(path) as f:
+                  content = f.read()
+              anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
+              if anchor in content and "/delete-node/ &disp_rdump_memory;" not in content:
+                  content = content.replace(anchor, "/delete-node/ &disp_rdump_memory;\n\n" + anchor, 1)
+                  with open(path, "w") as f:
+                      f.write(content)
+                  print("DTSI duplicate label fixed")
           EOF
 
-      # KernelSU 模块集成
-      - name: Integrate original KernelSU v0.9.5
+      # 5. 生成标准配置文件
+      - name: Generate Defconfig
         run: |
           cd kernel
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
-
-      # 如果你在 workflow-repo 放了 KernelSU 补丁，会在这里应用
-      - name: Apply KernelSU manual hook patches
-        run: |
-          cd kernel
-          if [ -d "../workflow-repo/patches" ] && [ "$(ls -A ../workflow-repo/patches/*.patch 2>/dev/null)" ]; then
-            for p in ../workflow-repo/patches/*.patch; do
-              echo "applying $p"
-              patch -p1 < "$p" || true
-            done
-          fi
-
-      # 3. 核心步骤：直接注入你提取的完整配置，不再使用 defconfig
-      - name: Inject Custom Extracted .config
-        run: |
-          cd kernel
+          export PATH="$GITHUB_WORKSPACE/toolchain/proton-clang/bin:$PATH"
           mkdir -p out
-          # 将你在仓库根目录放置的 gauguin_kernel_config.txt 复制为编译所需的 .config
-          cp ../workflow-repo/gauguin_kernel_config.txt out/.config
-          
-          # 追加一些必要参数 (KSU和版本精简)
-          {
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_LOCALVERSION_AUTO=n"
-          } >> out/.config
+          # 直接使用源码自带的默认配置文件
+          make O=out ARCH=arm64 PYTHON=python3 CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- vendor/gauguin_defconfig
 
-          export PATH="$GITHUB_WORKSPACE/toolchain/proton-clang/bin:$PATH"
-          # 使用 olddefconfig 命令让新源码树自动接纳并平滑升级老配置
-          make O=out ARCH=arm64 PYTHON=python3 CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- olddefconfig
-
-      # 4. 采用 Proton Clang 进行编译
-      - name: Build kernel Image and dtb
+      # 6. 开始编译内核
+      - name: Build Kernel Image & DTB
         run: |
           cd kernel
           export PATH="$GITHUB_WORKSPACE/toolchain/proton-clang/bin:$PATH"
-          export KBUILD_BUILD_USER=aospa
-          export KBUILD_BUILD_HOST=archlinux
+          export KBUILD_BUILD_USER="builder"
+          export KBUILD_BUILD_HOST="aospa"
           
           # 编译 Image
           make -j$(nproc) O=out \
@@ -167,7 +103,8 @@ jobs:
             vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
           ccache -s
 
-      - name: Concatenate Image + dtb manually
+      # 7. 手动拼接 Image.gz-dtb (高通平台常见格式)
+      - name: Concatenate Image + dtb
         run: |
           BOOT_OUT=kernel/out/arch/arm64/boot
           DTB="$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb"
@@ -176,17 +113,16 @@ jobs:
             echo "拼接完成"
           fi
 
-      - name: Checkout AnyKernel3 template
+      # 8. 下载并配置 AnyKernel3 打包工具
+      - name: Package with AnyKernel3
         run: |
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
-          rm -rf ak3/ramdisk ak3/patch ak3/.git
-
-      - name: Write anykernel.sh
-        run: |
+          rm -rf ak3/.git ak3/patch ak3/ramdisk
+          
           cat > ak3/anykernel.sh << 'EOF'
           ### AnyKernel3 Ramdisk Mod Script for gauguin
           properties() { '
-          kernel.string=AOSPA Topaz Kernel for Gauguin
+          kernel.string=AOSPA Standard Kernel for Gauguin
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -205,9 +141,7 @@ jobs:
           dump_boot;
           write_boot;
           EOF
-
-      - name: Package AnyKernel3 flashable zip
-        run: |
+          
           BOOT_OUT=kernel/out/arch/arm64/boot
           if [ -f "$BOOT_OUT/Image-dtb" ]; then
             cp "$BOOT_OUT/Image-dtb" ak3/Image
@@ -215,15 +149,17 @@ jobs:
             cp "$BOOT_OUT/Image" ak3/Image
             cp "$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb" ak3/dtb 2>/dev/null || true
           fi
+          
           cd ak3
-          zip -r9 ../gauguin-kernel-KSU-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-standard-AK3.zip . -x ".git*"
 
-      - name: Upload AK3 zip + build log
+      # 9. 上传产物
+      - name: Upload Build Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-AOSPA-Topaz
+          name: gauguin-kernel-standard
           path: |
-            gauguin-kernel-KSU-AK3.zip
+            gauguin-kernel-standard-AK3.zip
             kernel/build.log
           if-no-files-found: warn
