@@ -1,22 +1,23 @@
-name: Build Gauguin Kernel (DtHnAme + KernelSU v0.9.5)
+name: Build Gauguin Kernel (DtHnAme, A13-config boot test, no KSU)
 
 # 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113，已实测
-# 编译成功、正常开机、且没有复现幽灵触控)
+# 编译成功、在A11移植Flyme上正常开机、且没有复现幽灵触控)
 #
-# 本次在"纯净编译"基础上新增：
-# 1. 原版KernelSU v0.9.5手动hook集成（非SukiSU Ultra——按要求永久不用）
-# 2. 内核版本字符串精简：去掉编译工具链信息和CI机器痕迹
+# 本次目的：只验证一件事——这颗内核换上"对齐A13运行时config"的配置后，
+# 能不能在当前的A13 Flyme (Flyme 10.5.0.0A / meizu18X系统层
+# + gauguinpro原生vendor) 上正常开机。先不集成KSU，把变量降到最低，
+# 便于判断到底是不是config差异导致之前"震动后没到开机画面就重启"。
 #
-# 版本字符串各部分来源，方便你自己后续调整：
-#   "4.19.113-perf"        <- arch/arm64/configs/vendor/gauguin_user_defconfig
-#                              里的 CONFIG_LOCALVERSION="-perf"
-#   "-gXXXXXXX-dirty" 后缀  <- scripts/setlocalversion 的git自动追加，
-#                              本次通过 CONFIG_LOCALVERSION_AUTO=n 关掉
-#   "(user@host)"           <- KBUILD_BUILD_USER / KBUILD_BUILD_HOST
-#                              环境变量，见下面Build kernel步骤
-#   "(编译器信息)"           <- scripts/mkcompile_h 里 LINUX_COMPILER
-#                              那一行，本次patch成固定的"GNU C"
-#   "#1 SMP PREEMPT 时间"    <- 保留原样不动，就是实际编译时间
+# config差异来源：对比DtHnAme原版defconfig 和 手机上
+# `zcat /proc/config.gz` 提取出的当前A13内核完整config，
+# 703/734项完全一致，只有23项不同——这些差异追加在下面
+# "Apply A13-diff defconfig fragment"这一步里，配置层面尽量向
+# 当前能跑的A13环境靠拢，源码本身不动。
+#
+# 确认能开机之后，再考虑：
+#   1. 加回KernelSU（原来的5个hook patch还留着，随时能接回来）
+#   2. 版本字符串精简（这次故意没做，保留完整git hash/编译器信息，
+#      方便跟手机上 `cat /proc/version` 的输出直接对比调试）
 
 on:
   workflow_dispatch:
@@ -25,12 +26,6 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      # 本仓库存放 patches/ 目录下的5个KernelSU hook补丁
-      - name: Checkout this repo (KSU patches live here)
-        uses: actions/checkout@v4
-        with:
-          path: workflow-repo
-
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -41,9 +36,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-gauguin-dthname-ksu-${{ github.run_id }}
+          key: ccache-gauguin-dthname-a13test-${{ github.run_id }}
           restore-keys: |
-            ccache-gauguin-dthname-ksu-
+            ccache-gauguin-dthname-a13test-
 
       - name: Configure ccache
         run: |
@@ -54,7 +49,7 @@ jobs:
       - name: Checkout kernel source (DtHnAme, 11-1 branch, matches 4.19.113)
         run: |
           git clone --depth 1 --recurse-submodules --shallow-submodules --branch 11-1 \
-            https://github.com/meetclove/kernel_xiaomi_gauguin.git kernel
+            https://github.com/DtHnAme/kernel_xiaomi_gauguin.git kernel
 
       - name: Download AOSP Clang r416183b toolchain
         run: |
@@ -137,52 +132,42 @@ jobs:
               print("duplicate label 修复完成")
           EOF
 
-      # 版本字符串精简第一步：编译器信息那一整段改成固定的"GNU C"，
-      # 不再显示clang具体版本/googlesource链接这些暴露CI构建痕迹的内容。
-      # 想改成别的字符串，就编这一行的双引号里面那部分
-      - name: Simplify LINUX_COMPILER string in scripts/mkcompile_h
-        run: |
-          cd kernel
-          python3 - << 'EOF'
-          path = "scripts/mkcompile_h"
-          with open(path) as f:
-              content = f.read()
-          old = '''echo \\#define LINUX_COMPILER \\"`$CC -v 2>&1 | grep ' version ' | sed 's/[[:space:]]*$//'`\\"'''
-          new = 'echo \\#define LINUX_COMPILER \\"GNU C\\"'
-          if old not in content:
-              raise SystemExit("anchor not found, need manual check")
-          content = content.replace(old, new, 1)
-          with open(path, "w") as f:
-              f.write(content)
-          print("LINUX_COMPILER 已改成固定字符串")
-          EOF
-          grep -n "LINUX_COMPILER" scripts/mkcompile_h
-
-      # 原版KernelSU，官方文档写明1.0之后彻底不支持非GKI，必须用v0.9.5这个tag
-      - name: Integrate original KernelSU v0.9.5
-        run: |
-          cd kernel
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
-
-      # 5个hook补丁，已经对着这份DtHnAme 11-1源码重新验证过零fuzz应用
-      # (input.c那个patch context匹配到了不同行号但内容完全一致，同样通过)
-      - name: Apply KernelSU manual hook patches
-        run: |
-          cd kernel
-          for p in ../workflow-repo/patches/*.patch; do
-            echo "applying $p"
-            patch -p1 < "$p"
-          done
-
-      # CONFIG_KSU=y 启用root；CONFIG_LOCALVERSION_AUTO=n 关掉版本字符串
-      # 里git commit hash + dirty那段自动追加，配合上面mkcompile_h的改动，
-      # 最终效果是只保留 "4.19.113-perf" 这个干净前缀
-      - name: Apply defconfig fragment (KSU + version string)
+      # 23条差异逐条来源见上面顶部注释；优先级最高的3条(PANIC_ON_OOPS/
+      # RT_GROUP_SCHED/MSM_PERFORMANCE)最可能跟"震动后不到开机画面就
+      # 重启"直接相关。SERIAL_MSM_GENI_CONSOLE故意不跟A13对齐——保留
+      # UART console输出，纯粹是诊断手段，不影响能不能开机。
+      - name: Apply A13-diff defconfig fragment (no KSU this round)
         run: |
           cd kernel
           {
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_LOCALVERSION_AUTO=n"
+            echo "# --- A13 config diff overrides, top suspects for boot failure ---"
+            echo "# CONFIG_PANIC_ON_OOPS is not set"
+            echo "# CONFIG_RT_GROUP_SCHED is not set"
+            echo "# CONFIG_MSM_PERFORMANCE is not set"
+            echo ""
+            echo "# --- remaining A13 diffs, lower priority (debug/logging/misc) ---"
+            echo "CONFIG_LOG_BUF_SHIFT=17"
+            echo "CONFIG_RD_BZIP2=y"
+            echo "CONFIG_RD_LZMA=y"
+            echo "CONFIG_KALLSYMS_ALL=y"
+            echo "# CONFIG_HARDEN_BRANCH_PREDICTOR is not set"
+            echo "# CONFIG_GPIO_TESTING_MODE is not set"
+            echo "# CONFIG_SCSI_UFSHCD_CMD_LOGGING is not set"
+            echo "# CONFIG_XLOGCHAR is not set"
+            echo "CONFIG_LOGO=y"
+            echo "CONFIG_HID_MAGICMOUSE=y"
+            echo "CONFIG_IOMMU_DEBUG=y"
+            echo "CONFIG_IOMMU_TESTS=y"
+            echo "CONFIG_MSDOS_FS=y"
+            echo "# CONFIG_NTFS_FS is not set"
+            echo "# CONFIG_CRYPTO_LZ4 is not set"
+            echo "# CONFIG_DYNAMIC_DEBUG is not set"
+            echo "CONFIG_DEBUG_INFO=y"
+            echo "# CONFIG_DUMP_ALL_STACKS is not set"
+            echo "CONFIG_FRAME_WARN=2048"
+            echo ""
+            echo "# --- intentionally NOT matched to A13: keep UART console alive for debugging ---"
+            echo "CONFIG_SERIAL_MSM_GENI_CONSOLE=y"
           } >> arch/arm64/configs/vendor/gauguin_user_defconfig
 
       - name: Generate defconfig
@@ -190,17 +175,18 @@ jobs:
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
-          grep "CONFIG_KSU\|CONFIG_LOCALVERSION" out/.config
+          echo "--- 确认下面这几条确实生效了 ---"
+          grep -E "CONFIG_PANIC_ON_OOPS|CONFIG_RT_GROUP_SCHED|CONFIG_MSM_PERFORMANCE|CONFIG_SERIAL_MSM_GENI_CONSOLE|CONFIG_KSU" out/.config
 
-      # KBUILD_BUILD_USER/HOST：版本字符串里 (user@host) 那部分，改成跟
-      # 原作者一致的身份而不是GitHub Actions runner的机器名——
-      # 想换成别的，直接改这两个变量的值即可
+      # KBUILD_BUILD_USER/HOST 这次改成能一眼认出"这是A13-config测试build"
+      # 的标识，不是模仿原作者身份——方便你后续跟原版DtHnAme编译产物、
+      # 跟手机上现在跑的A13内核三者的版本字符串放在一起区分
       - name: Build kernel Image and gauguin-sm6350.dtb specifically
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
-          export KBUILD_BUILD_USER=dthname
-          export KBUILD_BUILD_HOST=archlinux
+          export KBUILD_BUILD_USER=a13test
+          export KBUILD_BUILD_HOST=a13test
           make -j$(nproc) O=out \
             ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -232,10 +218,10 @@ jobs:
         run: |
           cat > ak3/anykernel.sh << 'EOF'
           ### AnyKernel3 Ramdisk Mod Script for gauguin/gauguinpro
-          ## DtHnAme 11-1源码 + 原版KernelSU v0.9.5
+          ## DtHnAme 11-1源码 + A13-config boot test（无KSU）
 
           properties() { '
-          kernel.string=gauguin DtHnAme 11-1 + KernelSU v0.9.5
+          kernel.string=gauguin DtHnAme 11-1 A13-config-test (no KSU)
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -272,15 +258,15 @@ jobs:
       - name: Package AnyKernel3 flashable zip
         run: |
           cd ak3
-          zip -r9 ../gauguin-kernel-KSU-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-A13test-AK3.zip . -x ".git*"
           cd ..
 
       - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-KSU-AK3
+          name: gauguin-kernel-A13test-AK3
           path: |
-            gauguin-kernel-KSU-AK3.zip
+            gauguin-kernel-A13test-AK3.zip
             kernel/build.log
           if-no-files-found: warn
