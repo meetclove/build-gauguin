@@ -1,4 +1,4 @@
-name: Build Gauguin Kernel (DtHnAme, A13-config boot test, no KSU)
+name: Build Gauguin Kernel (DtHnAme, A13-config + crash-log-capture boot test, no KSU)
 
 # 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113，已实测
 # 编译成功、在A11移植Flyme上正常开机、且没有复现幽灵触控)
@@ -14,9 +14,15 @@ name: Build Gauguin Kernel (DtHnAme, A13-config boot test, no KSU)
 # "Apply A13-diff defconfig fragment"这一步里，配置层面尽量向
 # 当前能跑的A13环境靠拢，源码本身不动。
 #
+# 这版额外加了Aquarius223分享的抓日志方法（已对照本仓库真实源码核对
+# 过行号）：强制所有重启路径落到recovery，并把kmsg_dump提前到重启函数
+# 最前面，这样哪怕开机3秒就重启/秒进fastboot，也能在rec里读到
+# /proc/last_kmsg 或 /sys/fs/pstore/console-ramoops-0 拿到早期崩溃日志。
+#
 # 确认能开机之后，再考虑：
-#   1. 加回KernelSU（原来的5个hook patch还留着，随时能接回来）
-#   2. 版本字符串精简（这次故意没做，保留完整git hash/编译器信息，
+#   1. 移除上面这个强制进recovery的debug patch（不然以后正常重启也会被拉进rec）
+#   2. 加回KernelSU（原来的5个hook patch还留着，随时能接回来）
+#   3. 版本字符串精简（这次故意没做，保留完整git hash/编译器信息，
 #      方便跟手机上 `cat /proc/version` 的输出直接对比调试）
 
 on:
@@ -130,6 +136,70 @@ jobs:
               with open(path, "w") as f:
                   f.write(content)
               print("duplicate label 修复完成")
+          EOF
+
+      # 来自Aquarius223分享的抓日志方法，已对照DtHnAme 11-1分支的真实源码
+      # 核对过行号/函数结构，不是照搬未经验证的描述。
+      # 效果：不管是什么原因触发的重启(包括早期panic/看门狗)，都强制走
+      # warm reset + 写入recovery重启原因，这样崩溃后能落到rec里读日志，
+      # 而不是原地卡死或者反复bootloop看不到任何东西。
+      # 【注意】这是一次性诊断用的patch，确认能正常开机之后要移除，
+      # 否则以后每次正常重启也都会被强制拉进recovery。
+      - name: Patch msm-poweroff.c to force restart-to-recovery (debug only)
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          path = "drivers/power/reset/msm-poweroff.c"
+          with open(path) as f:
+              content = f.read()
+          anchor = ("\t/* Hard reset the PMIC unless memory contents must be maintained. */\n"
+                     "\tif (force_warm_reboot || need_warm_reset)\n"
+                     "\t\tqpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);\n")
+          if anchor not in content:
+              raise SystemExit("anchor not found, need manual check against this source tree")
+          if "[DEBUG] force every restart path" in content:
+              print("已经打过，跳过")
+          else:
+              inject = (
+                  "\t/* [DEBUG] force every restart path to redirect into recovery so\n"
+                  "\t * pstore/ramoops can be read after an early boot crash/panic.\n"
+                  "\t * Remove once boot is confirmed working. */\n"
+                  "\tqpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);\n"
+                  "\tqpnp_pon_set_restart_reason(PON_RESTART_REASON_RECOVERY);\n"
+                  "\t__raw_writel(0x77665502, restart_reason);\n"
+                  "\tflush_cache_all();\n"
+                  "\treturn;\n\n"
+              )
+              content = content.replace(anchor, inject + anchor, 1)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("msm-poweroff.c 强制重启到recovery patch完成")
+          EOF
+
+      - name: Patch kernel/reboot.c to dump kmsg before teardown (debug only)
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          path = "kernel/reboot.c"
+          with open(path) as f:
+              content = f.read()
+
+          replacements = [
+              ('void kernel_restart(char *cmd)\n{\n\tif (!cmd)\n\t\tpr_emerg("Restarting system\\n");\n\telse\n\t\tpr_emerg("Restarting system with command \'%s\'\\n", cmd);\n\n\tkmsg_dump(KMSG_DUMP_RESTART);\n',
+               'void kernel_restart(char *cmd)\n{\n\tkmsg_dump(KMSG_DUMP_RESTART);\n\tif (!cmd)\n\t\tpr_emerg("Restarting system\\n");\n\telse\n\t\tpr_emerg("Restarting system with command \'%s\'\\n", cmd);\n\n'),
+              ('void kernel_halt(void)\n{\n\tpr_emerg("System halted\\n");\n\tkmsg_dump(KMSG_DUMP_HALT);\n',
+               'void kernel_halt(void)\n{\n\tkmsg_dump(KMSG_DUMP_HALT);\n\tpr_emerg("System halted\\n");\n'),
+              ('void kernel_power_off(void)\n{\n\tpr_emerg("Power down\\n");\n\tkmsg_dump(KMSG_DUMP_POWEROFF);\n',
+               'void kernel_power_off(void)\n{\n\tkmsg_dump(KMSG_DUMP_POWEROFF);\n\tpr_emerg("Power down\\n");\n'),
+          ]
+          missing = [old for old, new in replacements if old not in content]
+          if missing:
+              raise SystemExit(f"{len(missing)} anchor(s) not found, need manual check against this source tree")
+          for old, new in replacements:
+              content = content.replace(old, new, 1)
+          with open(path, "w") as f:
+              f.write(content)
+          print("reboot.c 三个函数kmsg_dump前置完成")
           EOF
 
       # 23条差异逐条来源见上面顶部注释；优先级最高的3条(PANIC_ON_OOPS/
