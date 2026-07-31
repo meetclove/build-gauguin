@@ -1,15 +1,24 @@
-name: Build Gauguin Kernel (DtHnAme, A13-config + ReSukiSU manual hook + crash-log-capture)
+name: Build Gauguin Kernel (DtHnAme, A13-config + ReSukiSU manual hook + KPM)
 
-# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113，已实测
-# 编译成功、在A11移植Flyme上正常开机、且没有复现幽灵触控)
+# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113)
 #
-# 本次目的：这颗内核换上"对齐A13运行时config"的配置、集成ReSukiSU
-# (manual hook方式，4.19.113用不上kprobe，四处必需hook已对照真实源码
-# 核对过：fs/stat.c、fs/exec.c、fs/open.c、kernel/reboot.c；
-# input/setuid/sys_read三处用AUTO_*_HOOK这几个Kconfig开关代替手动patch，
-# CONFIG_KALLSYMS_ALL=y已经在A13-diff里，selinux那5处static符号导出
-# 也省了)之后，能不能在当前的A13 Flyme (Flyme 10.23.6.1)上正常开机。
-# 先不加susfs/KPM，一步步来，便于出问题时定位是哪一层导致的。
+# 状态：这套源码+A13差异config+ReSukiSU manual hook这个组合，已经在手机上
+# 实测确认能正常开机，ReSukiSU管理器正常识别驱动(内核版本显示为
+# 4.19.113-perf-gccb8855-dirty)。抓日志用的debug patch(强制进recovery+
+# kmsg_dump前置)已经移除，不再需要。
+#
+# 这版新加CONFIG_KPM=y——config层面的前提(CONFIG_KALLSYMS_ALL/
+# CONFIG_KALLSYMS)已经满足，4.19.113不低于4.19所以不用管set_memory.h
+# 那个backport。但非GKI内核上KPM有真实的翻车案例(编译过、config也对，
+# 管理器还是提示"unpatched"，得额外用SukiSU_patch仓库的patch_linux工具
+# 对编译出来的Image再处理一遍)，这次先加上试，manager里没识别到KPM
+# 生效的话再按这个思路补一步。
+#
+# SUSFS这次没加——ReSukiSU官方文档原话是"NonGKI branches are deprecated,
+# 需要自己backport"，susfs4ksu上游要求手动实现非kprobe hook、可能还要
+# 手动给内核结构体补android_kabi_reserved字段，这些补丁还是照着咱们
+# 已经改过的ReSukiSU manual hook代码去合并，不是一次干净的patch，
+# 属于工作量和不确定性都高出一截的独立任务，先不并进这一轮。
 #
 # config差异来源：对比DtHnAme原版defconfig 和 手机上
 # `zcat /proc/config.gz` 提取出的当前A13内核完整config，
@@ -22,12 +31,12 @@ name: Build Gauguin Kernel (DtHnAme, A13-config + ReSukiSU manual hook + crash-l
 # 最前面，这样哪怕开机3秒就重启/秒进fastboot，也能在rec里读到
 # /proc/last_kmsg 或 /sys/fs/pstore/console-ramoops-0 拿到早期崩溃日志。
 #
-# 确认能开机、且ReSukiSU管理器App能正常识别到驱动之后，再考虑：
-#   1. 移除强制进recovery的debug patch（不然以后正常重启也会被拉进rec）
-#   2. 加susfs（CONFIG_KSU_SUSFS=y + susfs4ksu仓库对应4.19分支的kernel-side
-#      patch，官方文档标注NonGKI分支已deprecated，需要自己backport）
-#   3. 加KPM（另外需要的Kconfig，跟susfs一样留到确认root能用之后再加）
-#   4. 版本字符串精简（这次故意没做，保留完整git hash/编译器信息，
+# 这版之后再考虑：
+#   1. 装好之后到ReSukiSU manager里确认KPM状态是不是真的生效了，不是
+#      光看编译成功
+#   2. susfs——按上面说的，单独开一轮，先搞清楚要不要在ReSukiSU manual
+#      hook代码基础上手动合susfs4ksu的patch，还是有其他更省事的路子
+#   3. 版本字符串精简（这次故意没做，保留完整git hash/编译器信息，
 #      方便跟手机上 `cat /proc/version` 的输出直接对比调试）
 
 on:
@@ -143,69 +152,9 @@ jobs:
               print("duplicate label 修复完成")
           EOF
 
-      # 来自Aquarius223分享的抓日志方法，已对照DtHnAme 11-1分支的真实源码
-      # 核对过行号/函数结构，不是照搬未经验证的描述。
-      # 效果：不管是什么原因触发的重启(包括早期panic/看门狗)，都强制走
-      # warm reset + 写入recovery重启原因，这样崩溃后能落到rec里读日志，
-      # 而不是原地卡死或者反复bootloop看不到任何东西。
-      # 【注意】这是一次性诊断用的patch，确认能正常开机之后要移除，
-      # 否则以后每次正常重启也都会被强制拉进recovery。
-      - name: Patch msm-poweroff.c to force restart-to-recovery (debug only)
-        run: |
-          cd kernel
-          python3 - << 'EOF'
-          path = "drivers/power/reset/msm-poweroff.c"
-          with open(path) as f:
-              content = f.read()
-          anchor = ("\t/* Hard reset the PMIC unless memory contents must be maintained. */\n"
-                     "\tif (force_warm_reboot || need_warm_reset)\n"
-                     "\t\tqpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);\n")
-          if anchor not in content:
-              raise SystemExit("anchor not found, need manual check against this source tree")
-          if "[DEBUG] force every restart path" in content:
-              print("已经打过，跳过")
-          else:
-              inject = (
-                  "\t/* [DEBUG] force every restart path to redirect into recovery so\n"
-                  "\t * pstore/ramoops can be read after an early boot crash/panic.\n"
-                  "\t * Remove once boot is confirmed working. */\n"
-                  "\tqpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);\n"
-                  "\tqpnp_pon_set_restart_reason(PON_RESTART_REASON_RECOVERY);\n"
-                  "\t__raw_writel(0x77665502, restart_reason);\n"
-                  "\tflush_cache_all();\n"
-                  "\treturn;\n\n"
-              )
-              content = content.replace(anchor, inject + anchor, 1)
-              with open(path, "w") as f:
-                  f.write(content)
-              print("msm-poweroff.c 强制重启到recovery patch完成")
-          EOF
-
-      - name: Patch kernel/reboot.c to dump kmsg before teardown (debug only)
-        run: |
-          cd kernel
-          python3 - << 'EOF'
-          path = "kernel/reboot.c"
-          with open(path) as f:
-              content = f.read()
-
-          replacements = [
-              ('void kernel_restart(char *cmd)\n{\n\tif (!cmd)\n\t\tpr_emerg("Restarting system\\n");\n\telse\n\t\tpr_emerg("Restarting system with command \'%s\'\\n", cmd);\n\n\tkmsg_dump(KMSG_DUMP_RESTART);\n',
-               'void kernel_restart(char *cmd)\n{\n\tkmsg_dump(KMSG_DUMP_RESTART);\n\tif (!cmd)\n\t\tpr_emerg("Restarting system\\n");\n\telse\n\t\tpr_emerg("Restarting system with command \'%s\'\\n", cmd);\n\n'),
-              ('void kernel_halt(void)\n{\n\tpr_emerg("System halted\\n");\n\tkmsg_dump(KMSG_DUMP_HALT);\n',
-               'void kernel_halt(void)\n{\n\tkmsg_dump(KMSG_DUMP_HALT);\n\tpr_emerg("System halted\\n");\n'),
-              ('void kernel_power_off(void)\n{\n\tpr_emerg("Power down\\n");\n\tkmsg_dump(KMSG_DUMP_POWEROFF);\n',
-               'void kernel_power_off(void)\n{\n\tkmsg_dump(KMSG_DUMP_POWEROFF);\n\tpr_emerg("Power down\\n");\n'),
-          ]
-          missing = [old for old, new in replacements if old not in content]
-          if missing:
-              raise SystemExit(f"{len(missing)} anchor(s) not found, need manual check against this source tree")
-          for old, new in replacements:
-              content = content.replace(old, new, 1)
-          with open(path, "w") as f:
-              f.write(content)
-          print("reboot.c 三个函数kmsg_dump前置完成")
-          EOF
+      # 来自Aquarius223分享的抓日志方法——这版已确认能正常开机(gccb8855)，
+      # 暂时不需要了，先移除。如果后面加KPM/susfs又出问题，这两个patch
+      # 随时能加回来，之前验证过的代码就在上一版main.yml里。
 
       # ReSukiSU集成，全部对照DtHnAme 11-1真实源码核对过锚点，本地跑过
       # str_replace校验才放进来的，不是照抄文档里的通用diff。
@@ -381,12 +330,17 @@ jobs:
         run: |
           cd kernel
           {
-            echo "# --- ReSukiSU (manual hook, no kprobe, no susfs/KPM yet) ---"
+            echo "# --- ReSukiSU (manual hook, confirmed booting on A13 as gccb8855) ---"
             echo "CONFIG_KSU=y"
             echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
+            echo "# KPM: CONFIG_KALLSYMS_ALL and CONFIG_KALLSYMS already satisfied"
+            echo "# below/elsewhere; 4.19.113 is not below 4.19 so no set_memory.h"
+            echo "# backport needed. NOT susfs -- that's a separate, much bigger"
+            echo "# undertaking, deliberately left out this round (see chat)."
+            echo "CONFIG_KPM=y"
             echo ""
             echo "# --- A13 config diff overrides, top suspects for boot failure ---"
             echo "# CONFIG_PANIC_ON_OOPS is not set"
@@ -424,7 +378,7 @@ jobs:
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
           echo "--- 确认下面这几条确实生效了 ---"
-          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL|CONFIG_PANIC_ON_OOPS|CONFIG_RT_GROUP_SCHED|CONFIG_MSM_PERFORMANCE|CONFIG_SERIAL_MSM_GENI_CONSOLE" out/.config
+          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KPM|CONFIG_KALLSYMS_ALL|CONFIG_PANIC_ON_OOPS|CONFIG_RT_GROUP_SCHED|CONFIG_MSM_PERFORMANCE|CONFIG_SERIAL_MSM_GENI_CONSOLE" out/.config
 
       # KBUILD_BUILD_USER/HOST 这次改成能一眼认出"这是A13-config测试build"
       # 的标识，不是模仿原作者身份——方便你后续跟原版DtHnAme编译产物、
@@ -469,7 +423,7 @@ jobs:
           ## DtHnAme 11-1源码 + A13-config + ReSukiSU manual-hook
 
           properties() { '
-          kernel.string=gauguin DtHnAme 11-1 A13-config + ReSukiSU manual-hook
+          kernel.string=gauguin DtHnAme 11-1 A13-config + ReSukiSU + KPM
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -506,15 +460,15 @@ jobs:
       - name: Package AnyKernel3 flashable zip
         run: |
           cd ak3
-          zip -r9 ../gauguin-kernel-ReSukiSU-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-ReSukiSU-KPM-AK3.zip . -x ".git*"
           cd ..
 
       - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-ReSukiSU-AK3
+          name: gauguin-kernel-ReSukiSU-KPM-AK3
           path: |
-            gauguin-kernel-ReSukiSU-AK3.zip
+            gauguin-kernel-ReSukiSU-KPM-AK3.zip
             kernel/build.log
           if-no-files-found: warn
