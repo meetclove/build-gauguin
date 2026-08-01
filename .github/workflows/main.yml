@@ -1,43 +1,14 @@
-name: Build Gauguin Kernel (DtHnAme, A13-config + ReSukiSU manual hook + KPM)
+name: Build Gauguin Kernel (DtHnAme, A13-config + ReSukiSU only)
 
 # 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113)
 #
-# 状态：这套源码+A13差异config+ReSukiSU manual hook这个组合，已经在手机上
-# 实测确认能正常开机，ReSukiSU管理器正常识别驱动(内核版本显示为
-# 4.19.113-perf-gccb8855-dirty)。抓日志用的debug patch(强制进recovery+
-# kmsg_dump前置)已经移除，不再需要。
+# 状态：这个组合已经实机确认能正常开机、ReSukiSU manager能正常识别驱动、
+# 管理root状态(内核版本显示4.19.113-perf-gccb8855-dirty)。
 #
-# 这版新加CONFIG_KPM=y——config层面的前提(CONFIG_KALLSYMS_ALL/
-# CONFIG_KALLSYMS)已经满足，4.19.113不低于4.19所以不用管set_memory.h
-# 那个backport。但非GKI内核上KPM有真实的翻车案例(编译过、config也对，
-# 管理器还是提示"unpatched"，得额外用SukiSU_patch仓库的patch_linux工具
-# 对编译出来的Image再处理一遍)，这次先加上试，manager里没识别到KPM
-# 生效的话再按这个思路补一步。
-#
-# SUSFS这次没加——ReSukiSU官方文档原话是"NonGKI branches are deprecated,
-# 需要自己backport"，susfs4ksu上游要求手动实现非kprobe hook、可能还要
-# 手动给内核结构体补android_kabi_reserved字段，这些补丁还是照着咱们
-# 已经改过的ReSukiSU manual hook代码去合并，不是一次干净的patch，
-# 属于工作量和不确定性都高出一截的独立任务，先不并进这一轮。
-#
-# config差异来源：对比DtHnAme原版defconfig 和 手机上
-# `zcat /proc/config.gz` 提取出的当前A13内核完整config，
-# 703/734项完全一致，只有23项不同——这些差异追加在下面
-# "Apply A13-diff defconfig fragment"这一步里，配置层面尽量向
-# 当前能跑的A13环境靠拢，源码本身不动。
-#
-# 这版额外加了Aquarius223分享的抓日志方法（已对照本仓库真实源码核对
-# 过行号）：强制所有重启路径落到recovery，并把kmsg_dump提前到重启函数
-# 最前面，这样哪怕开机3秒就重启/秒进fastboot，也能在rec里读到
-# /proc/last_kmsg 或 /sys/fs/pstore/console-ramoops-0 拿到早期崩溃日志。
-#
-# 这版之后再考虑：
-#   1. 装好之后到ReSukiSU manager里确认KPM状态是不是真的生效了，不是
-#      光看编译成功
-#   2. susfs——按上面说的，单独开一轮，先搞清楚要不要在ReSukiSU manual
-#      hook代码基础上手动合susfs4ksu的patch，还是有其他更省事的路子
-#   3. 版本字符串精简（这次故意没做，保留完整git hash/编译器信息，
-#      方便跟手机上 `cat /proc/version` 的输出直接对比调试）
+# SuSFS和KPM这版先退回去了——编译没报错，但刷入后manager里都没显示
+# 生效，具体原因还在排查(susfs大概率是缺配套的userspace module，KPM
+# 大概率是patch_linux那一步没真正生效，看构建日志能确认)，先保底用
+# 这个干净能用的版本，两个特性详细讨论见对话记录。
 
 on:
   workflow_dispatch:
@@ -317,31 +288,12 @@ jobs:
           print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
-      # input/setuid/sys_read这三个hook 4.19.113不用手动patch源码，走
-      # AUTO_*_HOOK这几个Kconfig开关就够了(见下面defconfig fragment)。
-      # CONFIG_KALLSYMS_ALL=y前面A13-diff那23条里已经有了，所以
-      # security/selinux/*.c那5处static符号导出也可以跳过，不用再改。
-
-      # 23条差异逐条来源见上面顶部注释；优先级最高的3条(PANIC_ON_OOPS/
-      # RT_GROUP_SCHED/MSM_PERFORMANCE)最可能跟"震动后不到开机画面就
-      # 重启"直接相关。SERIAL_MSM_GENI_CONSOLE故意不跟A13对齐——保留
-      # UART console输出，纯粹是诊断手段，不影响能不能开机。
-      - name: Apply A13-diff defconfig fragment + ReSukiSU config
-        run: |
-          cd kernel
-          {
             echo "# --- ReSukiSU (manual hook, confirmed booting on A13 as gccb8855) ---"
             echo "CONFIG_KSU=y"
             echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
-            echo "# KPM: CONFIG_KALLSYMS_ALL and CONFIG_KALLSYMS already satisfied"
-            echo "# below/elsewhere; 4.19.113 is not below 4.19 so no set_memory.h"
-            echo "# backport needed. NOT susfs -- that's a separate, much bigger"
-            echo "# undertaking, deliberately left out this round (see chat)."
-            echo "CONFIG_KPM=y"
-            echo ""
             echo "# --- A13 config diff overrides, top suspects for boot failure ---"
             echo "# CONFIG_PANIC_ON_OOPS is not set"
             echo "# CONFIG_RT_GROUP_SCHED is not set"
@@ -378,7 +330,7 @@ jobs:
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
           echo "--- 确认下面这几条确实生效了 ---"
-          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KPM|CONFIG_KALLSYMS_ALL|CONFIG_PANIC_ON_OOPS|CONFIG_RT_GROUP_SCHED|CONFIG_MSM_PERFORMANCE|CONFIG_SERIAL_MSM_GENI_CONSOLE" out/.config
+          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL|CONFIG_PANIC_ON_OOPS|CONFIG_RT_GROUP_SCHED|CONFIG_MSM_PERFORMANCE|CONFIG_SERIAL_MSM_GENI_CONSOLE" out/.config
 
       # KBUILD_BUILD_USER/HOST 这次改成能一眼认出"这是A13-config测试build"
       # 的标识，不是模仿原作者身份——方便你后续跟原版DtHnAme编译产物、
@@ -423,7 +375,7 @@ jobs:
           ## DtHnAme 11-1源码 + A13-config + ReSukiSU manual-hook
 
           properties() { '
-          kernel.string=gauguin DtHnAme 11-1 A13-config + ReSukiSU + KPM
+          kernel.string=gauguin DtHnAme 11-1 A13-config + ReSukiSU
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -460,15 +412,15 @@ jobs:
       - name: Package AnyKernel3 flashable zip
         run: |
           cd ak3
-          zip -r9 ../gauguin-kernel-ReSukiSU-KPM-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-ReSukiSU-AK3.zip . -x ".git*"
           cd ..
 
       - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-ReSukiSU-KPM-AK3
+          name: gauguin-kernel-ReSukiSU-AK3
           path: |
-            gauguin-kernel-ReSukiSU-KPM-AK3.zip
+            gauguin-kernel-ReSukiSU-AK3.zip
             kernel/build.log
           if-no-files-found: warn
