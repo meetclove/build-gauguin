@@ -1,24 +1,24 @@
-name: Build Gauguin Kernel (DtHnAme, A13-config + ReSukiSU + SuSFS + KPM)
+name: Build Gauguin Kernel (DtHnAme, A13-config + ReSukiSU manual hook + KPM)
 
 # 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113)
 #
-# 状态：源码+A13差异config+ReSukiSU manual hook这个组合已经实机确认能
-# 正常开机(内核版本显示4.19.113-perf-gccb8855-dirty，manager正常识别驱动)。
+# 状态：这套源码+A13差异config+ReSukiSU manual hook这个组合，已经在手机上
+# 实测确认能正常开机，ReSukiSU管理器正常识别驱动(内核版本显示为
+# 4.19.113-perf-gccb8855-dirty)。抓日志用的debug patch(强制进recovery+
+# kmsg_dump前置)已经移除，不再需要。
 #
-# 这版加了SuSFS和KPM，参考的是JackA1ltman/NonGKI_Kernel_Build_2nd项目
-# (看雪那篇Pixel3 4.9指南也是抄这个项目的思路)。SuSFS没有直接抄文档，
-# 是把它仓库里 susfs_patch_to_4.19.patch 拉下来、克隆了一份完整的
-# DtHnAme真实源码(含前面ReSukiSU那4个hook)本地实测过：19个文件里18个
-# 完全干净应用，只有fs/notify/fdinfo.c 1个hunk因为DtHnAme这版
-# seq_printf用的是ignored_mask:%x实际变量、上游patch期望ignored_mask:0
-# 字面量对不上失败，已经照着DtHnAme真实代码结构手动补好，跟原patch
-# 效果等价，这个修补是自动应用的，不需要你自己动手。
+# 这版新加CONFIG_KPM=y——config层面的前提(CONFIG_KALLSYMS_ALL/
+# CONFIG_KALLSYMS)已经满足，4.19.113不低于4.19所以不用管set_memory.h
+# 那个backport。但非GKI内核上KPM有真实的翻车案例(编译过、config也对，
+# 管理器还是提示"unpatched"，得额外用SukiSU_patch仓库的patch_linux工具
+# 对编译出来的Image再处理一遍)，这次先加上试，manager里没识别到KPM
+# 生效的话再按这个思路补一步。
 #
-# KPM：编译出来的Image还得额外用SukiSU_patch仓库的patch_linux工具处理
-# 一遍才真正生效——之前提过这个坑，这版已经在打包前自动加了这一步。
-#
-# 如果manager里SUSFS或KPM还是没显示生效，大概率是这两个特性本身在
-# 更新，跟这版verify过的细节对不上了，把manager截图发我对着改。
+# SUSFS这次没加——ReSukiSU官方文档原话是"NonGKI branches are deprecated,
+# 需要自己backport"，susfs4ksu上游要求手动实现非kprobe hook、可能还要
+# 手动给内核结构体补android_kabi_reserved字段，这些补丁还是照着咱们
+# 已经改过的ReSukiSU manual hook代码去合并，不是一次干净的patch，
+# 属于工作量和不确定性都高出一截的独立任务，先不并进这一轮。
 #
 # config差异来源：对比DtHnAme原版defconfig 和 手机上
 # `zcat /proc/config.gz` 提取出的当前A13内核完整config，
@@ -317,96 +317,7 @@ jobs:
           print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
-      # SuSFS——用的是NonGKI_Kernel_Build_2nd项目里现成的susfs_patch_to_4.19.patch，
-      # 不是从头写的。已经在本地对着DtHnAme真实源码(含前面4个ReSukiSU hook)
-      # 完整测试过：19个文件里18个完全干净应用，只有fs/notify/fdinfo.c 1个
-      # hunk因为DtHnAme这版seq_printf用的是ignored_mask:%x实际变量、上游patch
-      # 期望的是ignored_mask:0字面量，上下文对不上失败——已经手动照着DtHnAme
-      # 真实代码结构补好，跟原patch效果等价，下面这步会自动应用。
-      - name: Apply SuSFS patch (base + verified manual fix for fdinfo.c)
-        run: |
-          cd kernel
-          curl -sL -o susfs_patch_to_4.19.patch \
-            "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/Patch/susfs_patch_to_4.19.patch"
-          patch -p1 < susfs_patch_to_4.19.patch || true
-
-          python3 - << 'EOF'
-          path = "fs/notify/fdinfo.c"
-          with open(path) as f:
-              content = f.read()
-          if "CONFIG_KSU_SUSFS_SUS_MOUNT" in content and "susfs_is_current_proc_umounted" in content:
-              print("fdinfo.c 已经手动修好，跳过")
-          else:
-              anchor = ("static void inotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)\n"
-                        "{\n\tstruct inotify_inode_mark *inode_mark;\n\tstruct inode *inode;\n\n"
-                        "\tif (mark->connector->type != FSNOTIFY_OBJ_TYPE_INODE)\n\t\treturn;\n\n"
-                        "\tinode_mark = container_of(mark, struct inotify_inode_mark, fsn_mark);\n"
-                        "\tinode = igrab(fsnotify_conn_inode(mark->connector));\n\tif (inode) {\n")
-              assert anchor in content, "anchor not found -- fs/notify/fdinfo.c structure changed, check manually"
-              new = ("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-                     "static void inotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark, struct file *file)\n"
-                     "#else\nstatic void inotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)\n#endif\n"
-                     "{\n\tstruct inotify_inode_mark *inode_mark;\n\tstruct inode *inode;\n"
-                     "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tstruct mount *mnt = NULL;\n#endif\n\n"
-                     "\tif (mark->connector->type != FSNOTIFY_OBJ_TYPE_INODE)\n\t\treturn;\n\n"
-                     "\tinode_mark = container_of(mark, struct inotify_inode_mark, fsn_mark);\n"
-                     "\tinode = igrab(fsnotify_conn_inode(mark->connector));\n\tif (inode) {\n")
-              content = content.replace(anchor, new, 1)
-
-              anchor2 = ('\t\tu32 mask = mark->mask & IN_ALL_EVENTS;\n'
-                         '\t\tseq_printf(m, "inotify wd:%x ino:%lx sdev:%x mask:%x ignored_mask:%x ",\n'
-                         '\t\t\t   inode_mark->wd, inode->i_ino, inode->i_sb->s_dev,\n'
-                         '\t\t\t   mask, mark->ignored_mask);\n'
-                         '\t\tshow_mark_fhandle(m, inode);\n'
-                         '\t\tseq_putc(m, \'\\n\');\n\t\tiput(inode);\n\t}\n}')
-              assert anchor2 in content, "anchor2 not found -- fs/notify/fdinfo.c structure changed, check manually"
-              susfs_block = (
-                  "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-                  "\t\tmnt = real_mount(file->f_path.mnt);\n"
-                  "\t\tif (mnt->mnt_id >= DEFAULT_KSU_MNT_ID &&\n"
-                  "\t\t\tlikely(susfs_is_current_proc_umounted()))\n\t\t{\n"
-                  "\t\t\tstruct path path;\n"
-                  "\t\t\tchar *pathname = kmalloc(PAGE_SIZE, GFP_KERNEL);\n"
-                  "\t\t\tchar *dpath;\n"
-                  "\t\t\tif (!pathname) {\n\t\t\t\tgoto orig_flow;\n\t\t\t}\n"
-                  "\t\t\tdpath = d_path(&file->f_path, pathname, PAGE_SIZE);\n"
-                  "\t\t\tif (!dpath) {\n\t\t\t\tgoto out_kfree;\n\t\t\t}\n"
-                  "\t\t\tif (kern_path(dpath, 0, &path)) {\n\t\t\t\tgoto out_kfree;\n\t\t\t}\n"
-                  "\t\t\tif (!path.dentry->d_inode) {\n\t\t\t\tgoto out_path_put;\n\t\t\t}\n"
-                  "\t\t\tseq_printf(m, \"inotify wd:%x ino:%lx sdev:%x mask:%x ignored_mask:0 \",\n"
-                  "\t\t\t\t\tinode_mark->wd, path.dentry->d_inode->i_ino, path.dentry->d_inode->i_sb->s_dev,\n"
-                  "\t\t\t\t\tinotify_mark_user_mask(mark));\n"
-                  "\t\t\tshow_mark_fhandle(m, path.dentry->d_inode);\n"
-                  "\t\t\tseq_putc(m, '\\n');\n\t\t\tpath_put(&path);\n\t\t\tkfree(pathname);\n"
-                  "\t\t\tiput(inode);\n\t\t\treturn;\n"
-                  "out_path_put:\n\t\t\tpath_put(&path);\n"
-                  "out_kfree:\n\t\t\tkfree(pathname);\n\t\t}\norig_flow:\n"
-                  "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-              )
-              new2 = ('\t\tu32 mask = mark->mask & IN_ALL_EVENTS;\n' + susfs_block +
-                      '\t\tseq_printf(m, "inotify wd:%x ino:%lx sdev:%x mask:%x ignored_mask:%x ",\n'
-                      '\t\t\t   inode_mark->wd, inode->i_ino, inode->i_sb->s_dev,\n'
-                      '\t\t\t   mask, mark->ignored_mask);\n'
-                      '\t\tshow_mark_fhandle(m, inode);\n'
-                      '\t\tseq_putc(m, \'\\n\');\n\t\tiput(inode);\n\t}\n}')
-              content = content.replace(anchor2, new2, 1)
-              with open(path, "w") as f:
-                  f.write(content)
-              print("fs/notify/fdinfo.c 手动修补完成")
-          EOF
-
-          echo "--- 检查还有没有没解决的.rej文件，有的话直接报错，别悄悄漏掉 ---"
-          REMAINING=$(find . -name "*.rej")
-          if [ -n "$REMAINING" ]; then
-            echo "发现未处理的.rej文件："
-            echo "$REMAINING"
-            find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-            exit 1
-          fi
-          find . -type f \( -name "*.rej" -o -name "*.orig" \) -delete
-          echo "SuSFS patch全部应用完成，没有遗留冲突"
-
-
+      # input/setuid/sys_read这三个hook 4.19.113不用手动patch源码，走
       # AUTO_*_HOOK这几个Kconfig开关就够了(见下面defconfig fragment)。
       # CONFIG_KALLSYMS_ALL=y前面A13-diff那23条里已经有了，所以
       # security/selinux/*.c那5处static符号导出也可以跳过，不用再改。
@@ -425,22 +336,11 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
-            echo "# KPM: CONFIG_KALLSYMS_ALL/CONFIG_KALLSYMS already satisfied elsewhere;"
-            echo "# 4.19.113 is not below 4.19 so no set_memory.h backport needed."
+            echo "# KPM: CONFIG_KALLSYMS_ALL and CONFIG_KALLSYMS already satisfied"
+            echo "# below/elsewhere; 4.19.113 is not below 4.19 so no set_memory.h"
+            echo "# backport needed. NOT susfs -- that's a separate, much bigger"
+            echo "# undertaking, deliberately left out this round (see chat)."
             echo "CONFIG_KPM=y"
-            echo ""
-            echo "# --- SuSFS (base patch verified against real source, see step above) ---"
-            echo "CONFIG_KSU_SUSFS=y"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
-            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
-            echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-            echo "CONFIG_SUSFS_EXTRA_WORKS=y"
             echo ""
             echo "# --- A13 config diff overrides, top suspects for boot failure ---"
             echo "# CONFIG_PANIC_ON_OOPS is not set"
@@ -500,25 +400,6 @@ jobs:
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
             vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
           ccache -s
-
-      # KPM需要额外一步：编译出来的Image本身还不带KPM能力，得用SukiSU_patch
-      # 仓库里现成的patch_linux工具再处理一遍(这是之前提过的、非GKI上KPM
-      # 真实会遇到的额外步骤，不是config层面能替代的)。产出oImage替换原Image
-      # 继续走后面打包流程。
-      - name: Patch Image for KPM (patch_linux post-build step)
-        run: |
-          BOOT_OUT=kernel/out/arch/arm64/boot
-          cd "$BOOT_OUT"
-          curl -sL -o patch_linux \
-            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/kpm/patch_linux"
-          chmod +x patch_linux
-          ./patch_linux
-          if [ -f oImage ]; then
-            mv oImage Image
-            echo "KPM patch applied, Image替换完成"
-          else
-            echo "!! oImage没有生成，KPM patch可能失败了，继续用未patch的Image，但manager里KPM大概率不会显示生效"
-          fi
 
       - name: Concatenate Image + dtb manually
         run: |
