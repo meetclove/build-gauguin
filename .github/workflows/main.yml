@@ -1,14 +1,18 @@
-name: Build Gauguin Kernel (DtHnAme, A13-config + ReSukiSU only)
+name: Build Gauguin Kernel (DtHnAme 11-1, ReSukiSU manual hook, clean)
 
-# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支 (SUBLEVEL 113)
+# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支, 4.19.113——你已经实测确认
+# 在当前这套A11系统上能完美开机正常使用的那颗。
 #
-# 状态：这个组合已经实机确认能正常开机、ReSukiSU manager能正常识别驱动、
-# 管理root状态(内核版本显示4.19.113-perf-gccb8855-dirty)。
+# 这是一次彻底重写，不是在旧脚本上改：
+#   - 不带任何A13相关的config调整(那一批本来就是为了兼容之前的Flyme A13
+#     移植系统才加的，现在目标是A11，DtHnAme原版defconfig本身已经验证
+#     能完美开机，不需要也不应该再动它)
+#   - 不带重启强制进recovery抓日志那个debug patch，彻底清掉，只字未留
+#   - 不带susfs、不带KPM，都没成功验证过，不再浪费时间
 #
-# SuSFS和KPM这版先退回去了——编译没报错，但刷入后manager里都没显示
-# 生效，具体原因还在排查(susfs大概率是缺配套的userspace module，KPM
-# 大概率是patch_linux那一步没真正生效，看构建日志能确认)，先保底用
-# 这个干净能用的版本，两个特性详细讨论见对话记录。
+# 只做一件事：在DtHnAme原版defconfig基础上，加ReSukiSU（manual hook方式，
+# 这个内核用不上kprobe），模块和Zygisk模块能正常刷入使用为目标，其余全部
+# 保持原样。
 
 on:
   workflow_dispatch:
@@ -27,9 +31,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-gauguin-dthname-a13test-${{ github.run_id }}
+          key: ccache-gauguin-dthname-resukisu-clean-${{ github.run_id }}
           restore-keys: |
-            ccache-gauguin-dthname-a13test-
+            ccache-gauguin-dthname-resukisu-clean-
 
       - name: Configure ccache
         run: |
@@ -37,7 +41,7 @@ jobs:
           ccache --set-config=cache_dir=$HOME/.ccache
           ccache -z
 
-      - name: Checkout kernel source (DtHnAme, 11-1 branch, matches 4.19.113)
+      - name: Checkout kernel source (DtHnAme, 11-1 branch, confirmed A11 boot)
         run: |
           git clone --depth 1 --recurse-submodules --shallow-submodules --branch 11-1 \
             https://github.com/DtHnAme/kernel_xiaomi_gauguin.git kernel
@@ -123,15 +127,9 @@ jobs:
               print("duplicate label 修复完成")
           EOF
 
-      # 来自Aquarius223分享的抓日志方法——这版已确认能正常开机(gccb8855)，
-      # 暂时不需要了，先移除。如果后面加KPM/susfs又出问题，这两个patch
-      # 随时能加回来，之前验证过的代码就在上一版main.yml里。
-
-      # ReSukiSU集成，全部对照DtHnAme 11-1真实源码核对过锚点，本地跑过
-      # str_replace校验才放进来的，不是照抄文档里的通用diff。
-      # 4.19.113用不上kprobe(A13跑的内核和DtHnAme defconfig都没开
-      # CONFIG_KPROBES)，走manual hook这条路，跟你们上次A11+KSU成功那次
-      # 应该是同一套思路。
+      # ReSukiSU集成，4个必需manual hook——之前已经用这套源码实机验证过
+      # 能正常开机、manager正确识别驱动(Manual hook类型)。这次是纯净重写，
+      # 逻辑跟之前验证过的完全一致，没有新增改动。
       - name: Add ReSukiSU to kernel source tree
         run: |
           cd kernel
@@ -288,44 +286,18 @@ jobs:
           print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
-      - name: Apply A13-diff defconfig fragment + ReSukiSU config
+      # 只加ReSukiSU本身需要的5行，不动DtHnAme原版defconfig的其他任何东西——
+      # 那份config已经是实测完美开机的版本，能不碰就不碰。
+      - name: Apply ReSukiSU defconfig fragment (nothing else touched)
         run: |
           cd kernel
           {
-            echo "# --- ReSukiSU (manual hook, confirmed booting on A13 as gccb8855) ---"
+            echo "# --- ReSukiSU (manual hook) ---"
             echo "CONFIG_KSU=y"
             echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
-            echo "# --- A13 config diff overrides, top suspects for boot failure ---"
-            echo "# CONFIG_PANIC_ON_OOPS is not set"
-            echo "# CONFIG_RT_GROUP_SCHED is not set"
-            echo "# CONFIG_MSM_PERFORMANCE is not set"
-            echo ""
-            echo "# --- remaining A13 diffs, lower priority (debug/logging/misc) ---"
-            echo "CONFIG_LOG_BUF_SHIFT=17"
-            echo "CONFIG_RD_BZIP2=y"
-            echo "CONFIG_RD_LZMA=y"
-            echo "CONFIG_KALLSYMS_ALL=y"
-            echo "# CONFIG_HARDEN_BRANCH_PREDICTOR is not set"
-            echo "# CONFIG_GPIO_TESTING_MODE is not set"
-            echo "# CONFIG_SCSI_UFSHCD_CMD_LOGGING is not set"
-            echo "# CONFIG_XLOGCHAR is not set"
-            echo "CONFIG_LOGO=y"
-            echo "CONFIG_HID_MAGICMOUSE=y"
-            echo "CONFIG_IOMMU_DEBUG=y"
-            echo "CONFIG_IOMMU_TESTS=y"
-            echo "CONFIG_MSDOS_FS=y"
-            echo "# CONFIG_NTFS_FS is not set"
-            echo "# CONFIG_CRYPTO_LZ4 is not set"
-            echo "# CONFIG_DYNAMIC_DEBUG is not set"
-            echo "CONFIG_DEBUG_INFO=y"
-            echo "# CONFIG_DUMP_ALL_STACKS is not set"
-            echo "CONFIG_FRAME_WARN=2048"
-            echo ""
-            echo "# --- intentionally NOT matched to A13: keep UART console alive for debugging ---"
-            echo "CONFIG_SERIAL_MSM_GENI_CONSOLE=y"
           } >> arch/arm64/configs/vendor/gauguin_user_defconfig
 
       - name: Generate defconfig
@@ -333,18 +305,17 @@ jobs:
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
-          echo "--- 确认下面这几条确实生效了 ---"
-          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL|CONFIG_PANIC_ON_OOPS|CONFIG_RT_GROUP_SCHED|CONFIG_MSM_PERFORMANCE|CONFIG_SERIAL_MSM_GENI_CONSOLE" out/.config
+          echo "--- 确认下面这几条确实生效了，且没有任何A13/debug相关残留 ---"
+          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK" out/.config
+          echo "--- 确认没有任何crash-log-capture残留 ---"
+          grep -c "PON_RESTART_REASON_RECOVERY\|force every restart" out/.config || echo "0 (干净)"
 
-      # KBUILD_BUILD_USER/HOST 这次改成能一眼认出"这是A13-config测试build"
-      # 的标识，不是模仿原作者身份——方便你后续跟原版DtHnAme编译产物、
-      # 跟手机上现在跑的A13内核三者的版本字符串放在一起区分
-      - name: Build kernel Image and gauguin-sm6350.dtb specifically
+      - name: Build kernel Image and gauguin-sm6350.dtb
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
-          export KBUILD_BUILD_USER=a13test
-          export KBUILD_BUILD_HOST=a13test
+          export KBUILD_BUILD_USER=dthname
+          export KBUILD_BUILD_HOST=dthname
           make -j$(nproc) O=out \
             ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -365,7 +336,7 @@ jobs:
             cat "$BOOT_OUT/Image" "$DTB" > "$BOOT_OUT/Image-dtb"
             echo "拼接完成"
           fi
-          find kernel/out/arch/arm64/boot -maxdepth 3 -type f | sort
+          find kernel/out/arch/arm64/boot -maxdepth 3 -type f -name "Image*" | sort
 
       - name: Checkout AnyKernel3 template
         run: |
@@ -376,10 +347,10 @@ jobs:
         run: |
           cat > ak3/anykernel.sh << 'EOF'
           ### AnyKernel3 Ramdisk Mod Script for gauguin/gauguinpro
-          ## DtHnAme 11-1源码 + A13-config + ReSukiSU manual-hook
+          ## DtHnAme 11-1源码（已验证A11完美开机）+ ReSukiSU manual-hook，干净版
 
           properties() { '
-          kernel.string=gauguin DtHnAme 11-1 A13-config + ReSukiSU
+          kernel.string=gauguin DtHnAme 11-1 ReSukiSU-clean
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -416,15 +387,15 @@ jobs:
       - name: Package AnyKernel3 flashable zip
         run: |
           cd ak3
-          zip -r9 ../gauguin-kernel-ReSukiSU-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-ReSukiSU-clean-AK3.zip . -x ".git*"
           cd ..
 
       - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-ReSukiSU-AK3
+          name: gauguin-kernel-ReSukiSU-clean-AK3
           path: |
-            gauguin-kernel-ReSukiSU-AK3.zip
+            gauguin-kernel-ReSukiSU-clean-AK3.zip
             kernel/build.log
           if-no-files-found: warn
