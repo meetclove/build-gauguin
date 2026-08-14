@@ -286,8 +286,10 @@ jobs:
           print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
-      # 只加ReSukiSU本身需要的5行，不动DtHnAme原版defconfig的其他任何东西——
-      # 那份config已经是实测完美开机的版本，能不碰就不碰。
+      # CONFIG_KALLSYMS_ALL不是A13兼容性调整，是ReSukiSU自己的硬性前提——
+      # 不开这个就得手动在security/selinux/selinuxfs.c等文件里导出
+      # sel_handle_status_ops等符号，两条路二选一。这里选更简单、改动更小
+      # 的这条，其余DtHnAme原版defconfig内容不受影响。
       - name: Apply ReSukiSU defconfig fragment (nothing else touched)
         run: |
           cd kernel
@@ -298,6 +300,8 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
+            echo "# ReSukiSU build要求：不开这个就得手动导出selinuxfs.c里的符号"
+            echo "CONFIG_KALLSYMS_ALL=y"
           } >> arch/arm64/configs/vendor/gauguin_user_defconfig
 
       - name: Generate defconfig
@@ -306,7 +310,7 @@ jobs:
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
           echo "--- 确认下面这几条确实生效了，且没有任何A13/debug相关残留 ---"
-          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK" out/.config
+          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL" out/.config
           echo "--- 确认没有任何crash-log-capture残留 ---"
           grep -c "PON_RESTART_REASON_RECOVERY\|force every restart" out/.config || echo "0 (干净)"
 
