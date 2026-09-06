@@ -1,22 +1,20 @@
-name: Build Gauguin Kernel (official gauguin-r-oss + ReSukiSU manual hook)
+name: Build Gauguin Kernel (official r-oss code + DtHnAme vendor DTS + ReSukiSU)
 
-# 源码: MiCode/Xiaomi_Kernel_OpenSource, gauguin-r-oss分支——小米官方公开
-# 仓库，对应Redmi Note 9 Pro + Android R(11)，正好匹配你现在的官方MIUI。
+# 思路：官方gauguin-r-oss公开仓库本体没问题、SELinux/seccomp默认状态正常，
+# 但arch/arm64/boot/dts/vendor/整个目录官方压根没放出来(vendor/Makefile
+# 404，几个vendor dtsi文件全部404，顶层Makefile靠wildcard检测vendor/
+# Makefile存不存在来决定编不编译这个子目录，检测不到就直接跳过整个vendor
+# 树)——上一版build.log已经证实过：dtbs目标编出来的是8个跟这台设备毫不
+# 相干的高通公版参考板，一个vendor/qcom路径下的东西都没有，这就是刷入
+# 后开机不了、直接被安卓的init_fatal_reboot_target=recovery机制送进
+# recovery的根本原因。
 #
-# 已对照真实源码验证过，不是照抄Q分支或者DtHnAme那份直接套：
-#   - defconfig路径/文件名一致：arch/arm64/configs/vendor/gauguin_user_defconfig
-#     (733行，CONFIG_KALLSYMS_ALL默认就是y，不用额外加)
-#   - fs/stat.c、fs/exec.c、fs/open.c、kernel/reboot.c这4个ReSukiSU必需
-#     hook的行数(735/2000/1263/595)跟DtHnAme那份完全一致，逐个验证过锚点
-#     全部适用，不是照搬猜的
-#   - CONFIG_KPROBES默认没开，走manual hook
-#   - xiaomi-sm6350-common.dtsi这个文件在这个分支不存在(跟Q分支一样)，
-#     dtsi重复label那个修复步骤会自动跳过
-#
-# 这次的关键动机：官方内核(4.19.113-perf-g82b4b93)实测SELinux是强制执行、
-# Seccomp是过滤模式——这是你想要的状态。DtHnAme那份哪怕不集成ReSukiSU
-# 也是宽容模式，已经用对照实验确认过，问题在源码本身。这次换回官方源码，
-# 从根上避开那个问题，不需要再战宽容模式转强制这件事。
+# 这版做的事：内核代码本体用官方r-oss的，只把DtHnAme仓库里那份能正常用
+# 的arch/arm64/boot/dts/vendor/目录整个嫁接过来补上缺失的硬件描述——
+# 已确认DtHnAme这边有完整的vendor/Makefile(HTTP 200)。两边源码结构
+# 高度一致(文件行数逐个核对过完全相同)，理论上兼容，但这块嫁接没办法
+# 像hook那样逐行预先验证，真正结果要编译一次才知道，如果报错缺符号/
+# 缺驱动，日志会直接告诉我们具体缺什么，到时候针对性补。
 
 on:
   workflow_dispatch:
@@ -35,9 +33,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-gauguin-r-oss-resukisu-${{ github.run_id }}
+          key: ccache-gauguin-r-oss-hybrid-${{ github.run_id }}
           restore-keys: |
-            ccache-gauguin-r-oss-resukisu-
+            ccache-gauguin-r-oss-hybrid-
 
       - name: Configure ccache
         run: |
@@ -50,6 +48,25 @@ jobs:
           git clone --depth 1 --recurse-submodules --shallow-submodules \
             --branch gauguin-r-oss \
             https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
+
+      - name: Checkout DtHnAme source (only to harvest vendor DTS tree)
+        run: |
+          git clone --depth 1 --branch 11-1 \
+            https://github.com/DtHnAme/kernel_xiaomi_gauguin.git dthname_donor
+
+      # 官方源码里arch/arm64/boot/dts/vendor/这整个目录不存在，直接从
+      # DtHnAme那份完整拷过来，包括它自带的vendor/Makefile——这样顶层
+      # Makefile里那个wildcard检测就能通过，vendor子树会被正常编入。
+      - name: Graft DtHnAme's vendor DTS tree onto official source
+        run: |
+          if [ -d kernel/arch/arm64/boot/dts/vendor ]; then
+            echo "!! 官方源码这次居然带了vendor目录，不覆盖，直接用官方自己的"
+          else
+            cp -r dthname_donor/arch/arm64/boot/dts/vendor kernel/arch/arm64/boot/dts/vendor
+            echo "vendor DTS目录嫁接完成"
+            find kernel/arch/arm64/boot/dts/vendor -maxdepth 2 -type f | head -20
+          fi
+          rm -rf dthname_donor
 
       - name: Download AOSP Clang r416183b toolchain
         run: |
@@ -113,12 +130,14 @@ jobs:
               print("stpcpy inserted")
           EOF
 
-      - name: Fix duplicate disp_rdump_memory label (if this file exists on this tree)
+      # 这个修复现在又用得上了——问题文件是从DtHnAme那边嫁接过来的，
+      # DtHnAme自己的树里就有这个重复label问题，之前处理过一次。
+      - name: Fix duplicate disp_rdump_memory label (grafted from DtHnAme)
         run: |
           cd kernel
           TARGET="arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
           if [ ! -f "$TARGET" ]; then
-            echo "$TARGET 在gauguin-r-oss不存在，跳过（正常，官方源码没有这个文件）"
+            echo "$TARGET 不存在，跳过"
           else
             python3 - << 'EOF'
           path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
@@ -126,7 +145,7 @@ jobs:
               content = f.read()
           anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
           if anchor not in content:
-              print("!! anchor not found on this tree, skipping (may not be needed)")
+              print("!! anchor not found, skipping (may not be needed)")
           elif "/delete-node/ &disp_rdump_memory;" in content:
               print("已经修过，跳过")
           else:
@@ -137,8 +156,7 @@ jobs:
           EOF
           fi
 
-      # ReSukiSU集成，4个必需manual hook，已对照gauguin-r-oss真实源码核对
-      # 过锚点（行数跟DtHnAme完全一致，逐个verify过，不是假设通用）。
+      # ReSukiSU集成，4个必需manual hook，之前已对照这套源码结构核对过锚点。
       - name: Add ReSukiSU to kernel source tree
         run: |
           cd kernel
@@ -295,8 +313,6 @@ jobs:
           print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
-      # input/setuid/sys_read三个hook用AUTO_*_HOOK这几个Kconfig开关代替
-      # 手动patch。CONFIG_KALLSYMS_ALL官方defconfig里本来就是y，不用加。
       - name: Apply ReSukiSU defconfig fragment
         run: |
           cd kernel
@@ -317,45 +333,42 @@ jobs:
           echo "--- 确认下面这几条确实生效了 ---"
           grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL" out/.config
 
-      - name: Build kernel Image
+      # 这次直接用明确target(跟DtHnAme验证过能用的名字一致)，不再用容易
+      # 默认跑偏到公版参考板的dtbs这个笼统目标。
+      - name: Build kernel Image and gauguin-sm6350.dtb
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
-          export KBUILD_BUILD_USER=roqss
-          export KBUILD_BUILD_HOST=roqss
+          export KBUILD_BUILD_USER=hybrid
+          export KBUILD_BUILD_HOST=hybrid
           make -j$(nproc) O=out \
             ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
             Image 2>&1 | tee build.log
-          ccache -s
-
-      # DTB文件名这次也没能在官方源码里逐一核实到具体路径（Q分支也是同样
-      # 情况），这步自动找实际生成了哪个gauguin相关dtb，不用你自己排查。
-      - name: Build device tree blobs and locate gauguin dtb
-        run: |
-          cd kernel
-          export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make -j$(nproc) O=out \
             ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
-            dtbs 2>&1 | tee -a build.log || true
-          echo "--- 找到的gauguin相关dtb文件 ---"
-          find out/arch/arm64/boot/dts -iname "*gauguin*.dtb" | tee /tmp/gauguin_dtbs.txt
+            vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
+          ccache -s
+          echo "--- 确认这次真的编出了gauguin的dtb，不是走空 ---"
+          find out/arch/arm64/boot/dts/vendor -iname "*gauguin*" | tee /tmp/gauguin_dtbs.txt
+          if [ ! -s /tmp/gauguin_dtbs.txt ]; then
+            echo "!!! 还是没有gauguin dtb，target名字可能需要调整，看上面build.log具体报错"
+          fi
 
-      - name: Concatenate Image + dtb
+      - name: Concatenate Image + dtb manually
         run: |
           BOOT_OUT=kernel/out/arch/arm64/boot
-          DTB=$(head -1 /tmp/gauguin_dtbs.txt)
-          if [ -f "$BOOT_OUT/Image" ] && [ -n "$DTB" ] && [ -f "$DTB" ]; then
+          DTB="$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb"
+          if [ -f "$BOOT_OUT/Image" ] && [ -f "$DTB" ]; then
             cat "$BOOT_OUT/Image" "$DTB" > "$BOOT_OUT/Image-dtb"
-            echo "拼接完成，用的dtb: $DTB"
+            echo "拼接完成，确认用的是: $DTB"
           else
-            echo "!! 没找到匹配的dtb，只用纯Image，需要你手动确认路径后调整"
-            cp "$BOOT_OUT/Image" "$BOOT_OUT/Image-dtb" 2>/dev/null || true
+            echo "!! 目标dtb文件不存在，检查上一步日志"
           fi
-          find kernel/out/arch/arm64/boot -maxdepth 2 -type f -name "Image*" | sort
+          find kernel/out/arch/arm64/boot -maxdepth 3 -type f -name "Image*" | sort
 
       - name: Checkout AnyKernel3 template
         run: |
@@ -366,10 +379,10 @@ jobs:
         run: |
           cat > ak3/anykernel.sh << 'EOF'
           ### AnyKernel3 Ramdisk Mod Script for gauguin/gauguinpro
-          ## 官方gauguin-r-oss源码 + ReSukiSU manual-hook
+          ## 官方gauguin-r-oss内核代码 + DtHnAme vendor DTS + ReSukiSU manual-hook
 
           properties() { '
-          kernel.string=gauguin r-oss ReSukiSU manual-hook
+          kernel.string=gauguin r-oss+DtHnAme-dts ReSukiSU manual-hook
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -400,20 +413,21 @@ jobs:
             cp "$BOOT_OUT/Image-dtb" ak3/Image
           else
             cp "$BOOT_OUT/Image" ak3/Image
+            cp "$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb" ak3/dtb 2>/dev/null || true
           fi
 
       - name: Package AnyKernel3 flashable zip
         run: |
           cd ak3
-          zip -r9 ../gauguin-kernel-r-oss-ReSukiSU-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-hybrid-ReSukiSU-AK3.zip . -x ".git*"
           cd ..
 
       - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gauguin-kernel-r-oss-ReSukiSU-AK3
+          name: gauguin-kernel-hybrid-ReSukiSU-AK3
           path: |
-            gauguin-kernel-r-oss-ReSukiSU-AK3.zip
+            gauguin-kernel-hybrid-ReSukiSU-AK3.zip
             kernel/build.log
           if-no-files-found: warn
