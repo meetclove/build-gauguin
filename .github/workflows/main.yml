@@ -1,4 +1,4 @@
-name: 编译内核 (ReSukiSU manual hook)
+name: build-kernel (ReSukiSU manual hook)
 
 on:
   workflow_dispatch:
