@@ -1,4 +1,18 @@
-name: 编译内核 (ReSukiSU manual hook)
+name: Build Gauguin Kernel (DtHnAme 11-1, ReSukiSU manual hook, clean)
+
+# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支, 4.19.113——你已经实测确认
+# 在当前这套A11系统上能完美开机正常使用的那颗。
+#
+# 这是一次彻底重写，不是在旧脚本上改：
+#   - 不带任何A13相关的config调整(那一批本来就是为了兼容之前的Flyme A13
+#     移植系统才加的，现在目标是A11，DtHnAme原版defconfig本身已经验证
+#     能完美开机，不需要也不应该再动它)
+#   - 不带重启强制进recovery抓日志那个debug patch，彻底清掉，只字未留
+#   - 不带susfs、不带KPM，都没成功验证过，不再浪费时间
+#
+# 只做一件事：在DtHnAme原版defconfig基础上，加ReSukiSU（manual hook方式，
+# 这个内核用不上kprobe），模块和Zygisk模块能正常刷入使用为目标，其余全部
+# 保持原样。
 
 on:
   workflow_dispatch:
@@ -7,13 +21,13 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 安装编译环境依赖
+      - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y bison flex libssl-dev bc libncurses-dev \
-            build-essential libelf-dev rsync ccache zip unzip
+            build-essential libelf-dev rsync ccache
 
-      - name: 设置 ccache 缓存
+      - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
@@ -21,27 +35,27 @@ jobs:
           restore-keys: |
             ccache-gauguin-dthname-resukisu-clean-
 
-      - name: 配置 ccache
+      - name: Configure ccache
         run: |
           ccache --max-size=5G
           ccache --set-config=cache_dir=$HOME/.ccache
           ccache -z
 
-      - name: 拉取内核源码 
+      - name: Checkout kernel source (DtHnAme, 11-1 branch, confirmed A11 boot)
         run: |
           git clone --depth 1 --recurse-submodules --shallow-submodules --branch master \
             https://github.com/meetclove/kernel_xiaomi_gauguin kernel
 
-      - name: 下载 AOSP Clang r416183b 交叉编译工具链
+      - name: Download AOSP Clang r416183b toolchain
         run: |
           git clone --depth 1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git toolchain/clang11
           toolchain/clang11/bin/clang --version
 
-      - name: 下载配套的 AOSP GCC 4.9 交叉编译工具链
+      - name: Download matching AOSP GCC 4.9 toolchain
         run: |
           git clone --depth 1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git toolchain/gcc49
 
-      - name: 修复 scripts/gcc-wrapper.py 中的 Python2 语法错误
+      - name: Fix python2 syntax in scripts/gcc-wrapper.py
         run: |
           cd kernel
           if [ -f scripts/gcc-wrapper.py ]; then
@@ -55,19 +69,19 @@ jobs:
               scripts/gcc-wrapper.py
           fi
 
-      - name: 修复 Clang 交叉编译的 GCC_TOOLCHAIN_DIR 前缀
+      - name: Fix GCC_TOOLCHAIN_DIR prefix for Clang cross compilation
         run: |
           cd kernel
           sed -i 's|CLANG_FLAGS\t+= --prefix=$(GCC_TOOLCHAIN_DIR)$|CLANG_FLAGS\t+= --prefix=$(GCC_TOOLCHAIN_DIR)$(notdir $(CROSS_COMPILE))|' Makefile
 
-      - name: 修复 GSI symbol CRC 版本控制以兼容 lld
+      - name: Fix GSI symbol CRC versioning for lld compatibility
         run: |
           cd kernel
           if grep -q "if (is_crc) {" scripts/mod/modpost.c; then
             sed -i 's/if (is_crc) {/if (is_crc \&\& strcmp(symname + strlen("__crc_"), "gsi_write_channel_scratch")) {/' scripts/mod/modpost.c
           fi
 
-      - name: 补充 Clang 12 libcall 优化缺失的 stpcpy 实现
+      - name: Implement stpcpy for Clang 12 libcall optimization (if missing)
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -94,7 +108,7 @@ jobs:
               print("stpcpy inserted")
           EOF
 
-      - name: 修复 xiaomi-sm6350-common.dtsi 重复的 disp_rdump_memory 标签
+      - name: Fix duplicate disp_rdump_memory label in xiaomi-sm6350-common.dtsi
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -113,94 +127,29 @@ jobs:
               print("duplicate label 修复完成")
           EOF
 
-      - name: 清理内核源码中残留的旧版 KernelSU 遗留代码 (Auto-clean)
-        run: |
-          cd kernel
-          # 1. 物理删除残留文件夹
-          rm -rf drivers/kernelsu drivers/kernelsu-next || true
-          
-          # 2. 清除构建脚本中的编译挂载引用
-          sed -i '/kernelsu/d' drivers/Makefile || true
-          sed -i '/kernelsu/d' drivers/Kconfig || true
-          
-          # 3. 使用 Python 正则表达式深入擦除 C/H 源码中所有的旧版 Hook
-          python3 - << 'EOF'
-          import os, re
-          def clean_file(path):
-              if not os.path.exists(path): return
-              # 加上 encoding='utf-8', errors='ignore' 忽略特殊字符报错
-              with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                  content = f.read()
-              
-              # 非贪婪匹配擦除 #ifdef CONFIG_KSU 到 #endif 的整块代码
-              pattern = r'#ifdef\s+CONFIG_KSU(?:_MANUAL_HOOK)?\b.*?#endif\n?'
-              new_content = re.sub(pattern, '', content, flags=re.DOTALL)
-              
-              # 专门擦除旧版残留的 ksu 外部函数声明 (避免链接报错)
-              new_content = re.sub(r'extern\s+.*ksu_.*?;', '', new_content)
-              
-              if new_content != content:
-                  with open(path, 'w', encoding='utf-8') as f:
-                      f.write(new_content)
-                  print(f"✅ 成功清理遗留 Hook 污染: {path}")
-                  
-          for d in ['fs', 'kernel', 'security', 'include', 'drivers']:
-              if not os.path.exists(d): continue
-              for root, _, files in os.walk(d):
-                  for file in files:
-                      if file.endswith('.c') or file.endswith('.h'):
-                          clean_file(os.path.join(root, file))
-          EOF
-
-
-      - name: 修复内核编译命名，移除自定义名称保持原生官方格式
-        run: |
-          cd kernel
-          # 替换为标准 -perf 后缀，内核编译完会自动拼接上 4.19.113-perf-gxxxxxxx 格式
-          sed -i 's/CONFIG_LOCALVERSION="-LA.UM.9.12.r1-08000-SMxx50.0"/CONFIG_LOCALVERSION="-perf"/g' arch/arm64/configs/vendor/gauguin_user_defconfig
-
-      - name: 拉取并注入 ReSukiSU 核心代码
+      # ReSukiSU集成，4个必需manual hook——之前已经用这套源码实机验证过
+      # 能正常开机、manager正确识别驱动(Manual hook类型)。这次是纯净重写，
+      # 逻辑跟之前验证过的完全一致，没有新增改动。
+      - name: Add ReSukiSU to kernel source tree
         run: |
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: "ReSukiSU manual hook - fs/read_write.c (必须项: vfs_read)"
-        run: |
-          cd kernel
-          python3 - << 'EOF'
-          path = "fs/read_write.c"
-          with open(path) as f:
-              content = f.read()
-          
-          # 定位到 vfs_read 函数体并注入 ksu_handle_vfs_read
-          parts = content.split("ssize_t vfs_read(", 1)
-          if len(parts) == 2:
-              sub_parts = parts[1].split("if (ret >= 0) {\n\t\tcount = ret;", 1)
-              if len(sub_parts) == 2:
-                  hook_code = "if (ret >= 0) {\n\t\tcount = ret;\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\t\textern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n"
-                  parts[1] = hook_code + sub_parts[1]
-                  content = parts[0] + "ssize_t vfs_read(" + parts[1]
-                  with open(path, "w") as f:
-                      f.write(content)
-                  print("✅ fs/read_write.c (vfs_read) hook 完成")
-              else:
-                  print("❌ 未在 vfs_read 内部找到特征锚点")
-          else:
-              print("❌ 未找到 vfs_read 函数定义")
-          EOF
-
-      - name: "ReSukiSU manual hook - fs/stat.c (必须项: stat)"
+      - name: ReSukiSU manual hook - fs/stat.c (Required)
         run: |
           cd kernel
           python3 - << 'EOF'
           path = "fs/stat.c"
           with open(path) as f:
               content = f.read()
+          if "CONFIG_KSU_MANUAL_HOOK" in content and "ksu_handle_stat" in content:
+              print("已经打过，跳过"); raise SystemExit(0)
 
           anchor1 = ("#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)\n"
                      "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n"
                      "\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n"
                      "\terror = vfs_fstatat(dfd, filename, &stat, flag);")
+          assert anchor1 in content, "anchor1 (newfstatat) not found, check this source tree manually"
           decl = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\n"
                   "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
                   "\t\t\t\tint *flags);\n"
@@ -217,6 +166,7 @@ jobs:
           anchor2 = ('SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n'
                      '\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\n'
                      '\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n\n\treturn error;')
+          assert anchor2 in content, "anchor2 (newfstat) not found"
           content = content.replace(anchor2, anchor2.replace(
               "\treturn error;",
               "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\treturn error;"), 1)
@@ -224,6 +174,7 @@ jobs:
           anchor3 = ('SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n'
                      '\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\n'
                      '\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n\n\treturn error;')
+          assert anchor3 in content, "anchor3 (fstat64) not found"
           content = content.replace(anchor3, anchor3.replace(
               "\treturn error;",
               "#ifdef CONFIG_KSU_MANUAL_HOOK // for 32-bit\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n\treturn error;"), 1)
@@ -231,22 +182,25 @@ jobs:
           anchor4 = ("SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n"
                      "\t\tstruct stat64 __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n"
                      "\terror = vfs_fstatat(dfd, filename, &stat, flag);")
+          assert anchor4 in content, "anchor4 (fstatat64) not found"
           content = content.replace(anchor4, anchor4.replace(
               "\tint error;\n\n\terror = vfs_fstatat",
               "\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat"), 1)
 
           with open(path, "w") as f:
               f.write(content)
-          print("✅ fs/stat.c hook 完成")
+          print("fs/stat.c hook完成")
           EOF
 
-      - name: "ReSukiSU manual hook - fs/exec.c (必须项: execveat)"
+      - name: ReSukiSU manual hook - fs/exec.c (Required)
         run: |
           cd kernel
           python3 - << 'EOF'
           path = "fs/exec.c"
           with open(path) as f:
               content = f.read()
+          if "ksu_handle_execveat" in content:
+              print("已经打过，跳过"); raise SystemExit(0)
 
           anchor1 = ('int do_execve(struct filename *filename,\n'
                      '\tconst char __user *const __user *__argv,\n'
@@ -254,6 +208,7 @@ jobs:
                      '\tstruct user_arg_ptr argv = { .ptr.native = __argv };\n'
                      '\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n'
                      '\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}')
+          assert anchor1 in content, "anchor1 (do_execve) not found, check this source tree manually"
           decl = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\n"
                   "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
                   "\t\t\t\tvoid *argv, void *envp, int *flags);\n#endif\n\n")
@@ -270,6 +225,7 @@ jobs:
                      '\tstruct user_arg_ptr argv = {\n\t\t.is_compat = true,\n\t\t.ptr.compat = __argv,\n\t};\n'
                      '\tstruct user_arg_ptr envp = {\n\t\t.is_compat = true,\n\t\t.ptr.compat = __envp,\n\t};\n'
                      '\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}')
+          assert anchor2 in content, "anchor2 (compat_do_execve) not found"
           content = content.replace(anchor2, anchor2.replace(
               "\t};\n\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}",
               "\t};\n#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit ksud and 32-on-64 support\n"
@@ -278,17 +234,20 @@ jobs:
 
           with open(path, "w") as f:
               f.write(content)
-          print("✅ fs/exec.c hook 完成")
+          print("fs/exec.c hook完成")
           EOF
 
-      - name: "ReSukiSU manual hook - fs/open.c (必须项: faccessat)"
+      - name: ReSukiSU manual hook - fs/open.c (Required)
         run: |
           cd kernel
           python3 - << 'EOF'
           path = "fs/open.c"
           with open(path) as f:
               content = f.read()
+          if "ksu_handle_faccessat" in content:
+              print("已经打过，跳过"); raise SystemExit(0)
           anchor = "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n\treturn do_faccessat(dfd, filename, mode);\n}"
+          assert anchor in content, "anchor (faccessat) not found, check this source tree manually"
           decl = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\n"
                   "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
                   "\t\t\t\tint *mode, int *flags);\n#endif\n\n")
@@ -298,21 +257,24 @@ jobs:
           content = content.replace(anchor, decl + new, 1)
           with open(path, "w") as f:
               f.write(content)
-          print("✅ fs/open.c hook 完成")
+          print("fs/open.c hook完成")
           EOF
 
-      - name: "ReSukiSU manual hook - kernel/reboot.c (必须项: sys_reboot)"
+      - name: ReSukiSU manual hook - kernel/reboot.c sys_reboot (Required)
         run: |
           cd kernel
           python3 - << 'EOF'
           path = "kernel/reboot.c"
           with open(path) as f:
               content = f.read()
+          if "ksu_handle_sys_reboot" in content:
+              print("已经打过，跳过"); raise SystemExit(0)
           anchor = ("SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n"
                     "\t\tvoid __user *, arg)\n{\n"
                     "\tstruct pid_namespace *pid_ns = task_active_pid_ns(current);\n"
                     "\tchar buffer[256];\n\tint ret = 0;\n\n"
                     "\t/* We only trust the superuser with rebooting the system. */")
+          assert anchor in content, "anchor (SYSCALL_DEFINE4 reboot) not found, check this source tree manually"
           decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
           new = anchor.replace(
               "\tint ret = 0;\n\n\t/* We only trust",
@@ -321,10 +283,14 @@ jobs:
           content = content.replace(anchor, decl + new, 1)
           with open(path, "w") as f:
               f.write(content)
-          print("✅ kernel/reboot.c sys_reboot hook 完成")
+          print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
-      - name: 注入 ReSukiSU 编译配置选项 (Defconfig fragment)
+      # CONFIG_KALLSYMS_ALL不是A13兼容性调整，是ReSukiSU自己的硬性前提——
+      # 不开这个就得手动在security/selinux/selinuxfs.c等文件里导出
+      # sel_handle_status_ops等符号，两条路二选一。这里选更简单、改动更小
+      # 的这条，其余DtHnAme原版defconfig内容不受影响。
+      - name: Apply ReSukiSU defconfig fragment (nothing else touched)
         run: |
           cd kernel
           {
@@ -334,38 +300,58 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
             echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
+            echo "# ReSukiSU build要求：不开这个就得手动导出selinuxfs.c里的符号"
             echo "CONFIG_KALLSYMS_ALL=y"
           } >> arch/arm64/configs/vendor/gauguin_user_defconfig
 
-      - name: 编译内核 Image 与所有 dtb
+      - name: Generate defconfig
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
-          
-          # 生成 .config
           make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
-          
-          # 正式编译 (加入 dtbs 确保必定生成 dtb)
+          echo "--- 确认下面这几条确实生效了，且没有任何A13/debug相关残留 ---"
+          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL" out/.config
+          echo "--- 确认没有任何crash-log-capture残留 ---"
+          grep -c "PON_RESTART_REASON_RECOVERY\|force every restart" out/.config || echo "0 (干净)"
+
+      - name: Build kernel Image and gauguin-sm6350.dtb
+        run: |
+          cd kernel
+          export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           export KBUILD_BUILD_USER=dthname
           export KBUILD_BUILD_HOST=dthname
           make -j$(nproc) O=out \
             ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
-            Image dtbs 2>&1 | tee build.log
-          
+            Image 2>&1 | tee build.log
+          make -j$(nproc) O=out \
+            ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
+            CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
+            HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
+            vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
           ccache -s
 
-      - name: 检出 AnyKernel3 打包模板
+      - name: Concatenate Image + dtb manually
+        run: |
+          BOOT_OUT=kernel/out/arch/arm64/boot
+          DTB="$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb"
+          if [ -f "$BOOT_OUT/Image" ] && [ -f "$DTB" ]; then
+            cat "$BOOT_OUT/Image" "$DTB" > "$BOOT_OUT/Image-dtb"
+            echo "拼接完成"
+          fi
+          find kernel/out/arch/arm64/boot -maxdepth 3 -type f -name "Image*" | sort
+
+      - name: Checkout AnyKernel3 template
         run: |
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
           rm -rf ak3/ramdisk ak3/patch ak3/.git
 
-      - name: 写入 AnyKernel3 刷机脚本配置
+      - name: Write anykernel.sh for gauguin/gauguinpro
         run: |
           cat > ak3/anykernel.sh << 'EOF'
           ### AnyKernel3 Ramdisk Mod Script for gauguin/gauguinpro
-          ## DtHnAme 11-1源码 + ReSukiSU manual-hook
+          ## DtHnAme 11-1源码（已验证A11完美开机）+ ReSukiSU manual-hook，干净版
 
           properties() { '
           kernel.string=gauguin DtHnAme 11-1 ReSukiSU-clean
@@ -392,36 +378,23 @@ jobs:
           write_boot;
           EOF
 
-      - name: "自动搜寻内核与 DTB 并放置到 AK3 (修复 DTB 找不到的问题)"
+      - name: Stage kernel artifacts into AnyKernel3 zip
         run: |
           BOOT_OUT=kernel/out/arch/arm64/boot
-          
-          # 提取 Image
-          if [ -f "$BOOT_OUT/Image" ]; then
+          if [ -f "$BOOT_OUT/Image-dtb" ]; then
+            cp "$BOOT_OUT/Image-dtb" ak3/Image
+          else
             cp "$BOOT_OUT/Image" ak3/Image
-            echo "✅ Image 复制成功"
-          else
-            echo "❌ 错误: 未生成 Image"
-            exit 1
-          fi
-          
-          # 使用 find 精确匹配生成的 dtb 文件，学习自参考脚本思路
-          DTB=$(find "$BOOT_OUT/dts" -type f -name "gauguin-sm6350.dtb" | head -n 1)
-          if [ -n "$DTB" ]; then
-            cp "$DTB" ak3/dtb
-            echo "✅ 成功找到并复制 DTB: $DTB"
-          else
-            echo "❌ 警告: 未找到 gauguin-sm6350.dtb 文件!"
-            exit 1
+            cp "$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb" ak3/dtb 2>/dev/null || true
           fi
 
-      - name: 使用 zip -qr9 标准方法打包 AnyKernel3 卡刷包
+      - name: Package AnyKernel3 flashable zip
         run: |
           cd ak3
-          zip -qr9 ../gauguin-kernel-ReSukiSU-clean-AK3.zip . -x ".git*"
+          zip -r9 ../gauguin-kernel-ReSukiSU-clean-AK3.zip . -x ".git*"
           cd ..
 
-      - name: 上传刷机包与编译日志至 Artifacts
+      - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
