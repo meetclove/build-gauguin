@@ -1,4 +1,4 @@
-name: build-kernel (ReSukiSU manual hook)
+name: 编译内核 (ReSukiSU manual hook)
 
 on:
   workflow_dispatch:
@@ -162,7 +162,7 @@ jobs:
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: ReSukiSU manual hook - fs/read_write.c (必须项: vfs_read)
+      - name: "ReSukiSU manual hook - fs/read_write.c (必须项: vfs_read)"
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -175,7 +175,7 @@ jobs:
           if len(parts) == 2:
               sub_parts = parts[1].split("if (ret >= 0) {\n\t\tcount = ret;", 1)
               if len(sub_parts) == 2:
-                  hook_code = "if (ret >= 0) {\n\t\tcount = ret;\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\t\textern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif"
+                  hook_code = "if (ret >= 0) {\n\t\tcount = ret;\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\t\textern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n"
                   parts[1] = hook_code + sub_parts[1]
                   content = parts[0] + "ssize_t vfs_read(" + parts[1]
                   with open(path, "w") as f:
@@ -187,7 +187,7 @@ jobs:
               print("❌ 未找到 vfs_read 函数定义")
           EOF
 
-      - name: ReSukiSU manual hook - fs/stat.c (必须项: stat)
+      - name: "ReSukiSU manual hook - fs/stat.c (必须项: stat)"
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -238,7 +238,7 @@ jobs:
           print("✅ fs/stat.c hook 完成")
           EOF
 
-      - name: ReSukiSU manual hook - fs/exec.c (必须项: execveat)
+      - name: "ReSukiSU manual hook - fs/exec.c (必须项: execveat)"
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -279,7 +279,7 @@ jobs:
           print("✅ fs/exec.c hook 完成")
           EOF
 
-      - name: ReSukiSU manual hook - fs/open.c (必须项: faccessat)
+      - name: "ReSukiSU manual hook - fs/open.c (必须项: faccessat)"
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -299,7 +299,7 @@ jobs:
           print("✅ fs/open.c hook 完成")
           EOF
 
-      - name: ReSukiSU manual hook - kernel/reboot.c (必须项: sys_reboot)
+      - name: "ReSukiSU manual hook - kernel/reboot.c (必须项: sys_reboot)"
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -390,7 +390,7 @@ jobs:
           write_boot;
           EOF
 
-      - name: 自动搜寻内核与 DTB 并放置到 AK3 (修复 DTB 找不到的问题)
+      - name: "自动搜寻内核与 DTB 并放置到 AK3 (修复 DTB 找不到的问题)"
         run: |
           BOOT_OUT=kernel/out/arch/arm64/boot
           
