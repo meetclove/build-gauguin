@@ -128,7 +128,8 @@ jobs:
           import os, re
           def clean_file(path):
               if not os.path.exists(path): return
-              with open(path, 'r') as f:
+              # 加上 encoding='utf-8', errors='ignore' 忽略特殊字符报错
+              with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                   content = f.read()
               
               # 非贪婪匹配擦除 #ifdef CONFIG_KSU 到 #endif 的整块代码
@@ -139,7 +140,7 @@ jobs:
               new_content = re.sub(r'extern\s+.*ksu_.*?;', '', new_content)
               
               if new_content != content:
-                  with open(path, 'w') as f:
+                  with open(path, 'w', encoding='utf-8') as f:
                       f.write(new_content)
                   print(f"✅ 成功清理遗留 Hook 污染: {path}")
                   
@@ -150,6 +151,7 @@ jobs:
                       if file.endswith('.c') or file.endswith('.h'):
                           clean_file(os.path.join(root, file))
           EOF
+
 
       - name: 修复内核编译命名，移除自定义名称保持原生官方格式
         run: |
