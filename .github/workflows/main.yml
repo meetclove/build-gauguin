@@ -8,9 +8,14 @@ name: Build Gauguin 4.19 (Dhollmen + ReSukiSU, ccache)
 # 相对原脚本(SukiSU-Ultra版)的改动：
 #   1. SukiSU-Ultra换成ReSukiSU
 #   2. 新增一步：清理这个仓库自带的旧版KernelSU遗留hook——只删
-#      drivers/kernelsu目录不够，fs/stat.c、fs/exec.c、fs/open.c以及
-#      fs/read_write.c里还各自塞了旧hook调用，不清理会导致链接报错
-#      或者未通过ReSukiSU的兼容性检查
+#      drivers/kernelsu目录不够，fs/stat.c、fs/exec.c、fs/open.c里还各自
+#      在vfs_statx/do_execveat_common/do_faccessat这几个更底层的函数里
+#      塞了旧hook调用，跟我们要加的hook不在同一个函数、不会互相报冲突，
+#      但都在CONFIG_KSU这个开关下，一旦置y就会同时生效——问题在于
+#      fs/exec.c里那段旧代码还引用了ksu_execveat_hook、
+#      ksu_handle_execveat_sucompat这两个ReSukiSU当前驱动代码里已经没有
+#      的旧符号，删掉kernelsu目录换上ReSukiSU之后这两个符号找不到定义，
+#      链接会直接报undefined reference，所以这步是必须的，不是可选清理
 #   3. defconfig里CONFIG_LOCALVERSION原来是硬编码的
 #      "-LA.UM.9.12.r1-08000-SMxx50.0"，改成"-perf"+LOCALVERSION_AUTO=y，
 #      这样显示出来是熟悉的"4.19.113-perf-g<hash>"格式
@@ -64,13 +69,13 @@ jobs:
           git clone --depth=1 https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin project
           rm -rf project/drivers/kernelsu
 
-      # 必须先做，清理旧版KernelSU的残留hook代码（包括拦截编译的 ksu_vfs_read_hook）
+      # 必须先做，理由见顶部注释——不清理这三处，链接阶段会因为
+      # ksu_handle_execveat_sucompat/ksu_execveat_hook这两个符号找不到而失败。
       - name: Clean up old leftover KernelSU hooks from this repo
         run: |
           cd project
           python3 - << 'EOF'
           import re
-          import os
 
           # fs/stat.c: remove old decl + call inside vfs_statx
           path = "fs/stat.c"
@@ -86,11 +91,13 @@ jobs:
           if call in c:
               c = c.replace(call, '', 1); removed += 1
           open(path, "w").write(c)
-          print(f"fs/stat.c: 清掉{removed}处旧hook片段")
+          print(f"fs/stat.c: 清掉{removed}处旧hook片段（预期2）")
 
           # fs/exec.c: remove old decl block + call block inside do_execveat_common
           path = "fs/exec.c"
           c = open(path).read()
+          # decl block (variable + 2 function externs) - match loosely via regex since exact
+          # whitespace of this 3rd-party addition may vary slightly
           decl_re = re.compile(
               r'#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook.*?\n#endif\n\n',
               re.DOTALL
@@ -102,7 +109,7 @@ jobs:
           )
           c3, n2 = call_re.subn('', c2, count=1)
           open(path, "w").write(c3)
-          print(f"fs/exec.c: 正则清理，decl块={n1}处，call块={n2}处")
+          print(f"fs/exec.c: 正则清理，decl块={n1}处，call块={n2}处（预期都是1）")
 
           # fs/open.c: remove old decl + call inside do_faccessat
           path = "fs/open.c"
@@ -118,23 +125,10 @@ jobs:
           if call in c:
               c = c.replace(call, '', 1); removed += 1
           open(path, "w").write(c)
-          print(f"fs/open.c: 清掉{removed}处旧hook片段")
-          
-          # fs/read_write.c: remove old ksu_vfs_read_hook (This caused the compile to fail)
-          path = "fs/read_write.c"
-          if os.path.exists(path):
-              c = open(path).read()
-              decl_re = re.compile(r'#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook.*?\n#endif\n\n?', re.DOTALL)
-              c, n1 = decl_re.subn('', c, count=1)
-              decl2_re = re.compile(r'#ifdef CONFIG_KSU\nextern int ksu_handle_vfs_read.*?\n#endif\n\n?', re.DOTALL)
-              c, n3 = decl2_re.subn('', c, count=1)
-              call_re = re.compile(r'#ifdef CONFIG_KSU\n\tif \(unlikely\(ksu_vfs_read_hook\)\).*?\n#endif\n', re.DOTALL)
-              c, n2 = call_re.subn('', c, count=1)
-              open(path, "w").write(c)
-              print(f"fs/read_write.c: 正则清理旧版 hook，decl块={n1+n3}处，call块={n2}处")
+          print(f"fs/open.c: 清掉{removed}处旧hook片段（预期2）")
           EOF
           echo "--- 确认清理干净，下面应该没有输出 ---"
-          grep -n "ksu_execveat_hook\|ksu_handle_execveat_sucompat\|ksu_vfs_read_hook\|CONFIG_KSU" fs/stat.c fs/exec.c fs/open.c fs/read_write.c || echo "(确认干净)"
+          grep -n "ksu_execveat_hook\|ksu_handle_execveat_sucompat\|CONFIG_KSU" fs/stat.c fs/exec.c fs/open.c || echo "(确认干净)"
 
       # 改成熟悉的"-perf-g<hash>"格式，而不是硬编码的BSP版本字符串。
       - name: Fix CONFIG_LOCALVERSION to use git-hash auto format
