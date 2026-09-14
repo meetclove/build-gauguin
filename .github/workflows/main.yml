@@ -108,11 +108,11 @@ jobs:
               print("stpcpy inserted")
           EOF
 
-      - name: Fix duplicate disp_rdump_memory label in xiaomi-sm6350-common.dtsi
+      - name: Fix duplicate disp_rdump_memory label in xiaomi-sm8250-common.dtsi
         run: |
           cd kernel
           python3 - << 'EOF'
-          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
+          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm82500-common.dtsi"
           with open(path) as f:
               content = f.read()
           anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
@@ -314,7 +314,7 @@ jobs:
           echo "--- 确认没有任何crash-log-capture残留 ---"
           grep -c "PON_RESTART_REASON_RECOVERY\|force every restart" out/.config || echo "0 (干净)"
 
-      - name: Build kernel Image and gauguin-sm6350.dtb
+      - name: Build kernel Image and gauguin-sm8250.dtb
         run: |
           cd kernel
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
@@ -329,13 +329,13 @@ jobs:
             ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
             CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
             HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
-            vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
+            vendor/qcom/gauguin-sm8250.dtb 2>&1 | tee -a build.log
           ccache -s
 
       - name: Concatenate Image + dtb manually
         run: |
           BOOT_OUT=kernel/out/arch/arm64/boot
-          DTB="$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb"
+          DTB="$BOOT_OUT/dts/vendor/qcom/gauguin-sm8250.dtb"
           if [ -f "$BOOT_OUT/Image" ] && [ -f "$DTB" ]; then
             cat "$BOOT_OUT/Image" "$DTB" > "$BOOT_OUT/Image-dtb"
             echo "拼接完成"
@@ -385,7 +385,7 @@ jobs:
             cp "$BOOT_OUT/Image-dtb" ak3/Image
           else
             cp "$BOOT_OUT/Image" ak3/Image
-            cp "$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb" ak3/dtb 2>/dev/null || true
+            cp "$BOOT_OUT/dts/vendor/qcom/gauguin-sm8250.dtb" ak3/dtb 2>/dev/null || true
           fi
 
       - name: Package AnyKernel3 flashable zip
