@@ -43,7 +43,7 @@ jobs:
 
       - name: Checkout kernel source (DtHnAme, 11-1 branch, confirmed A11 boot)
         run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules --branch master \
+          git clone --depth 1 --recurse-submodules --shallow-submodules --branch OctaviOS \
             https://github.com/TonyJoaca/kernel_xiaomi_alioth kernel
 
       - name: Download AOSP Clang r416183b toolchain
