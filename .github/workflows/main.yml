@@ -112,7 +112,7 @@ jobs:
         run: |
           cd kernel
           python3 - << 'EOF'
-          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm82500-common.dtsi"
+          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm8250-common.dtsi"
           with open(path) as f:
               content = f.read()
           anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
