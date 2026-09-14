@@ -1,60 +1,23 @@
-name: Build Gauguin 4.19 (Dhollmen + ReSukiSU, ccache)
-
-# 源码: Dhollmen/Kernel_Xiaomi_Gauguin——实测SELinux强制执行、Seccomp过滤
-# 模式，工具链沿用你之前那份验证过能用的脚本(ZyCromerZ Clang 11.1.0 +
-# LineageOS GCC 4.9)，构建方式也保持一致：defconfig生成后直接裸make，
-# 不显式指定target，跟原脚本行为完全一致。
-#
-# 相对原脚本(SukiSU-Ultra版)的改动：
-#   1. SukiSU-Ultra换成ReSukiSU
-#   2. 新增一步：清理这个仓库自带的旧版KernelSU遗留hook——只删
-#      drivers/kernelsu目录不够，fs/stat.c、fs/exec.c、fs/open.c里还各自
-#      在vfs_statx/do_execveat_common/do_faccessat这几个更底层的函数里
-#      塞了旧hook调用，跟我们要加的hook不在同一个函数、不会互相报冲突，
-#      但都在CONFIG_KSU这个开关下，一旦置y就会同时生效——问题在于
-#      fs/exec.c里那段旧代码还引用了ksu_execveat_hook、
-#      ksu_handle_execveat_sucompat这两个ReSukiSU当前驱动代码里已经没有
-#      的旧符号，删掉kernelsu目录换上ReSukiSU之后这两个符号找不到定义，
-#      链接会直接报undefined reference，所以这步是必须的，不是可选清理
-#   3. defconfig里CONFIG_LOCALVERSION原来是硬编码的
-#      "-LA.UM.9.12.r1-08000-SMxx50.0"，改成"-perf"+LOCALVERSION_AUTO=y，
-#      这样显示出来是熟悉的"4.19.113-perf-g<hash>"格式
-#   4. 加ccache
-#   5. 不打AK3包，只把Image和dtbo压缩打包
-#
-# 如果你想用自己fork的那份而不是Dhollmen原仓库，把下面checkout那步的
-# URL换成你自己的fork地址即可，其余不用动。
-
+name: Build Gauguin 4.19 KSU
 on:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Setup Configuration
         run: |
           echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> $GITHUB_ENV
+
+      - name: Setup build kernel environment
+        run: |
           echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
-
-      - name: Install build dependencies
-        run: |
           sudo apt-get update
-          sudo apt-get install -y git flex lzop bison make libssl-dev python3 python-is-python3 libncurses-dev ccache
-
-      - name: Setup ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-gauguin-dhollmen-resukisu-${{ github.run_id }}
-          restore-keys: |
-            ccache-gauguin-dhollmen-resukisu-
-
-      - name: Configure ccache
-        run: |
-          ccache --max-size=5G
-          ccache --set-config=cache_dir=$HOME/.ccache
-          ccache -z
+          sudo apt-get install git flex lzop bison make libssl-dev python3 python-is-python3 libncurses-dev
 
       - name: Download Toolchains
         run: |
@@ -69,92 +32,6 @@ jobs:
           git clone --depth=1 https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin project
           rm -rf project/drivers/kernelsu
 
-      # 必须先做，理由见顶部注释——不清理这三处，链接阶段会因为
-      # ksu_handle_execveat_sucompat/ksu_execveat_hook这两个符号找不到而失败。
-      - name: Clean up old leftover KernelSU hooks from this repo
-        run: |
-          cd project
-          python3 - << 'EOF'
-          import re
-
-          # fs/stat.c: remove old decl + call inside vfs_statx
-          path = "fs/stat.c"
-          c = open(path).read()
-          decl = ('#ifdef CONFIG_KSU\n'
-                  'extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n'
-                  '\t\t\t\tint *flags);\n'
-                  '#endif\n\n')
-          call = '#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flags);\n#endif\n\n'
-          removed = 0
-          if decl in c:
-              c = c.replace(decl, '', 1); removed += 1
-          if call in c:
-              c = c.replace(call, '', 1); removed += 1
-          open(path, "w").write(c)
-          print(f"fs/stat.c: 清掉{removed}处旧hook片段（预期2）")
-
-          # fs/exec.c: remove old decl block + call block inside do_execveat_common
-          path = "fs/exec.c"
-          c = open(path).read()
-          # decl block (variable + 2 function externs) - match loosely via regex since exact
-          # whitespace of this 3rd-party addition may vary slightly
-          decl_re = re.compile(
-              r'#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook.*?\n#endif\n\n',
-              re.DOTALL
-          )
-          c2, n1 = decl_re.subn('', c, count=1)
-          call_re = re.compile(
-              r'#ifdef CONFIG_KSU\n\tif \(unlikely\(ksu_execveat_hook\)\).*?\n#endif\n',
-              re.DOTALL
-          )
-          c3, n2 = call_re.subn('', c2, count=1)
-          open(path, "w").write(c3)
-          print(f"fs/exec.c: 正则清理，decl块={n1}处，call块={n2}处（预期都是1）")
-
-          # fs/open.c: remove old decl + call inside do_faccessat
-          path = "fs/open.c"
-          c = open(path).read()
-          decl = ('#ifdef CONFIG_KSU\n'
-                  'extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n'
-                  '\t\t\t        int *flags);\n'
-                  '#endif\n\n')
-          call = '#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n'
-          removed = 0
-          if decl in c:
-              c = c.replace(decl, '', 1); removed += 1
-          if call in c:
-              c = c.replace(call, '', 1); removed += 1
-          open(path, "w").write(c)
-          print(f"fs/open.c: 清掉{removed}处旧hook片段（预期2）")
-
-          # fs/read_write.c: 这个是这次编译报错真正缺的一块——旧版
-          # ksu_vfs_read_hook这个符号名，跟ReSukiSU现在的驱动代码对不上，
-          # build时的兼容性检查会直接判定"incompatible hook"报错终止。
-          # 这个函数(vfs_read)我们自己不需要手动patch(靠
-          # CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK这个开关自动处理)，
-          # 只需要把这段旧的清干净，不需要替换成新的。
-          path = "fs/read_write.c"
-          c = open(path).read()
-          decl = ('#ifdef CONFIG_KSU\n'
-                  'extern bool ksu_vfs_read_hook __read_mostly;\n'
-                  'extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,\n'
-                  '\t\t\tsize_t *count_ptr, loff_t **pos);\n'
-                  '#endif\n\n')
-          call = ('#ifdef CONFIG_KSU\n'
-                  '\tif (unlikely(ksu_vfs_read_hook))\n'
-                  '\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n'
-                  '#endif\n\n')
-          removed = 0
-          if decl in c:
-              c = c.replace(decl, '', 1); removed += 1
-          if call in c:
-              c = c.replace(call, '', 1); removed += 1
-          open(path, "w").write(c)
-          print(f"fs/read_write.c: 清掉{removed}处旧hook片段（预期2）")
-          EOF
-          echo "--- 确认清理干净，下面应该没有输出 ---"
-          grep -n "ksu_execveat_hook\|ksu_handle_execveat_sucompat\|ksu_vfs_read_hook\|ksu_handle_vfs_read\|CONFIG_KSU\b" fs/stat.c fs/exec.c fs/open.c fs/read_write.c || echo "(确认干净)"
-
       # 改成熟悉的"-perf-g<hash>"格式，而不是硬编码的BSP版本字符串。
       - name: Fix CONFIG_LOCALVERSION to use git-hash auto format
         run: |
@@ -163,206 +40,38 @@ jobs:
           sed -i 's/^# CONFIG_LOCALVERSION_AUTO is not set/CONFIG_LOCALVERSION_AUTO=y/' "arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}"
           grep "LOCALVERSION" "arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}"
 
-      - name: Apply ReSukiSU defconfig fragment
+
+      - name: Setup Patches
         run: |
           cd project
           {
             echo "CONFIG_KSU=y"
             echo "CONFIG_KSU_MANUAL_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
-            echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
             echo "CONFIG_KSU_SUSFS=n"
-          } >> "arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}"
+          } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
+          git apply ../ksu_hooks_sukisu_4.19.patch
 
-      - name: Add ReSukiSU to kernel source tree
+      - name: Setup SukiSU-Ultra
         run: |
           cd project
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          git config --global user.email "bot@example.com"
+          git config --global user.name "bot"
+          git add .
+          git commit -m ksu
 
-      - name: ReSukiSU manual hook - fs/stat.c (Required)
-        run: |
-          cd project
-          python3 - << 'EOF'
-          path = "fs/stat.c"
-          with open(path) as f:
-              content = f.read()
-          if "CONFIG_KSU_MANUAL_HOOK" in content and "ksu_handle_stat" in content:
-              print("已经打过，跳过"); raise SystemExit(0)
-
-          anchor1 = ("#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)\n"
-                     "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n"
-                     "\t\tstruct stat __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n"
-                     "\terror = vfs_fstatat(dfd, filename, &stat, flag);")
-          assert anchor1 in content, "anchor1 (newfstatat) not found, check this source tree manually"
-          decl = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\n"
-                  "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
-                  "\t\t\t\tint *flags);\n"
-                  "extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n"
-                  "#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\n"
-                  "extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n"
-                  "#endif\n#endif\n\n")
-          new1 = anchor1.replace(
-              "\tint error;\n\n\terror = vfs_fstatat",
-              "\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat"
-          )
-          content = content.replace(anchor1, decl + new1, 1)
-
-          anchor2 = ('SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)\n{\n'
-                     '\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\n'
-                     '\tif (!error)\n\t\terror = cp_new_stat(&stat, statbuf);\n\n\treturn error;')
-          assert anchor2 in content, "anchor2 (newfstat) not found"
-          content = content.replace(anchor2, anchor2.replace(
-              "\treturn error;",
-              "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\treturn error;"), 1)
-
-          anchor3 = ('SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)\n{\n'
-                     '\tstruct kstat stat;\n\tint error = vfs_fstat(fd, &stat);\n\n'
-                     '\tif (!error)\n\t\terror = cp_new_stat64(&stat, statbuf);\n\n\treturn error;')
-          assert anchor3 in content, "anchor3 (fstat64) not found"
-          content = content.replace(anchor3, anchor3.replace(
-              "\treturn error;",
-              "#ifdef CONFIG_KSU_MANUAL_HOOK // for 32-bit\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n\treturn error;"), 1)
-
-          anchor4 = ("SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n"
-                     "\t\tstruct stat64 __user *, statbuf, int, flag)\n{\n\tstruct kstat stat;\n\tint error;\n\n"
-                     "\terror = vfs_fstatat(dfd, filename, &stat, flag);")
-          assert anchor4 in content, "anchor4 (fstatat64) not found"
-          content = content.replace(anchor4, anchor4.replace(
-              "\tint error;\n\n\terror = vfs_fstatat",
-              "\tint error;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat"), 1)
-
-          with open(path, "w") as f:
-              f.write(content)
-          print("fs/stat.c hook完成")
-          EOF
-
-      - name: ReSukiSU manual hook - fs/exec.c (Required)
-        run: |
-          cd project
-          python3 - << 'EOF'
-          path = "fs/exec.c"
-          with open(path) as f:
-              content = f.read()
-          if "ksu_handle_execveat" in content:
-              print("已经打过，跳过"); raise SystemExit(0)
-
-          anchor1 = ('int do_execve(struct filename *filename,\n'
-                     '\tconst char __user *const __user *__argv,\n'
-                     '\tconst char __user *const __user *__envp)\n{\n'
-                     '\tstruct user_arg_ptr argv = { .ptr.native = __argv };\n'
-                     '\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n'
-                     '\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}')
-          assert anchor1 in content, "anchor1 (do_execve) not found, check this source tree manually"
-          decl = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\n"
-                  "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
-                  "\t\t\t\tvoid *argv, void *envp, int *flags);\n#endif\n\n")
-          new1 = anchor1.replace(
-              "\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}",
-              "\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n"
-              "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n"
-              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}"
-          )
-          content = content.replace(anchor1, decl + new1, 1)
-
-          anchor2 = ('static int compat_do_execve(struct filename *filename,\n'
-                     '\tconst compat_uptr_t __user *__argv,\n\tconst compat_uptr_t __user *__envp)\n{\n'
-                     '\tstruct user_arg_ptr argv = {\n\t\t.is_compat = true,\n\t\t.ptr.compat = __argv,\n\t};\n'
-                     '\tstruct user_arg_ptr envp = {\n\t\t.is_compat = true,\n\t\t.ptr.compat = __envp,\n\t};\n'
-                     '\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}')
-          assert anchor2 in content, "anchor2 (compat_do_execve) not found"
-          content = content.replace(anchor2, anchor2.replace(
-              "\t};\n\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}",
-              "\t};\n#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit ksud and 32-on-64 support\n"
-              "\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n"
-              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}"), 1)
-
-          with open(path, "w") as f:
-              f.write(content)
-          print("fs/exec.c hook完成")
-          EOF
-
-      - name: ReSukiSU manual hook - fs/open.c (Required)
-        run: |
-          cd project
-          python3 - << 'EOF'
-          path = "fs/open.c"
-          with open(path) as f:
-              content = f.read()
-          if "ksu_handle_faccessat" in content:
-              print("已经打过，跳过"); raise SystemExit(0)
-          anchor = "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n\treturn do_faccessat(dfd, filename, mode);\n}"
-          assert anchor in content, "anchor (faccessat) not found, check this source tree manually"
-          decl = ("#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\n"
-                  "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
-                  "\t\t\t\tint *mode, int *flags);\n#endif\n\n")
-          new = ("SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n"
-                 "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n"
-                 "\treturn do_faccessat(dfd, filename, mode);\n}")
-          content = content.replace(anchor, decl + new, 1)
-          with open(path, "w") as f:
-              f.write(content)
-          print("fs/open.c hook完成")
-          EOF
-
-      - name: ReSukiSU manual hook - kernel/reboot.c sys_reboot (Required)
-        run: |
-          cd project
-          python3 - << 'EOF'
-          path = "kernel/reboot.c"
-          with open(path) as f:
-              content = f.read()
-          if "ksu_handle_sys_reboot" in content:
-              print("已经打过，跳过"); raise SystemExit(0)
-          anchor = ("SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n"
-                    "\t\tvoid __user *, arg)\n{\n"
-                    "\tstruct pid_namespace *pid_ns = task_active_pid_ns(current);\n"
-                    "\tchar buffer[256];\n\tint ret = 0;\n\n"
-                    "\t/* We only trust the superuser with rebooting the system. */")
-          assert anchor in content, "anchor (SYSCALL_DEFINE4 reboot) not found, check this source tree manually"
-          decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
-          new = anchor.replace(
-              "\tint ret = 0;\n\n\t/* We only trust",
-              "\tint ret = 0;\n\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\n\t/* We only trust"
-          )
-          content = content.replace(anchor, decl + new, 1)
-          with open(path, "w") as f:
-              f.write(content)
-          print("kernel/reboot.c sys_reboot hook完成")
-          EOF
-
-      # 构建方式跟原脚本保持一致：先生成defconfig，再裸make，不额外指定
-      # target，只是CC/HOSTCC前面加ccache。
       - name: Build kernel
         run: |
           cd project
           export PATH=$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/clang/bin:$PATH
           export ARCH=arm64
           export SUBARCH=arm64
-          make O=out ARCH=arm64 SUBARCH=arm64 CC="ccache clang" HOSTCC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 ${{ env.KERNEL_DEFCONFIG }}
-          echo "--- 确认ReSukiSU配置生效、没有旧hook残留 ---"
-          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_LOCALVERSION" out/.config
-          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC="ccache clang" HOSTCC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 2>&1 | tee build.log
-          ccache -s
+          make O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 ${{ env.KERNEL_DEFCONFIG }}
+          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1
 
-      # 只要Image和dtbo，不打AK3。
-      - name: Package Image + dtbo
-        run: |
-          mkdir -p release
-          find project/out/arch/arm64/boot -maxdepth 1 -type f -name "Image*" -exec cp {} release/ \;
-          find project/out/arch/arm64/boot -iname "dtbo*.img" -exec cp {} release/ \;
-          find project/out/arch/arm64/boot/dts -iname "*.dtbo" -exec cp {} release/ \; 2>/dev/null || true
-          echo "--- 打包进release/的文件 ---"
-          ls -la release/
-          cd release
-          zip -r9 ../Gauguin_4.19_ReSukiSU_${{ env.BUILD_TIME }}.zip .
-
-      - name: Upload
-        if: always()
+      - name: Upload the kernel zip
         uses: actions/upload-artifact@v4
         with:
-          name: Gauguin_4.19_ReSukiSU_${{ env.BUILD_TIME }}
+          name: Gauguin_4.19_${{ env.BUILD_TIME}}
           path: |
-            Gauguin_4.19_ReSukiSU_*.zip
-            project/build.log
-          if-no-files-found: warn
+            project/out/arch/arm64/boot/*
