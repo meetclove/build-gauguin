@@ -126,9 +126,34 @@ jobs:
               c = c.replace(call, '', 1); removed += 1
           open(path, "w").write(c)
           print(f"fs/open.c: 清掉{removed}处旧hook片段（预期2）")
+
+          # fs/read_write.c: 这个是这次编译报错真正缺的一块——旧版
+          # ksu_vfs_read_hook这个符号名，跟ReSukiSU现在的驱动代码对不上，
+          # build时的兼容性检查会直接判定"incompatible hook"报错终止。
+          # 这个函数(vfs_read)我们自己不需要手动patch(靠
+          # CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK这个开关自动处理)，
+          # 只需要把这段旧的清干净，不需要替换成新的。
+          path = "fs/read_write.c"
+          c = open(path).read()
+          decl = ('#ifdef CONFIG_KSU\n'
+                  'extern bool ksu_vfs_read_hook __read_mostly;\n'
+                  'extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,\n'
+                  '\t\t\tsize_t *count_ptr, loff_t **pos);\n'
+                  '#endif\n\n')
+          call = ('#ifdef CONFIG_KSU\n'
+                  '\tif (unlikely(ksu_vfs_read_hook))\n'
+                  '\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n'
+                  '#endif\n\n')
+          removed = 0
+          if decl in c:
+              c = c.replace(decl, '', 1); removed += 1
+          if call in c:
+              c = c.replace(call, '', 1); removed += 1
+          open(path, "w").write(c)
+          print(f"fs/read_write.c: 清掉{removed}处旧hook片段（预期2）")
           EOF
           echo "--- 确认清理干净，下面应该没有输出 ---"
-          grep -n "ksu_execveat_hook\|ksu_handle_execveat_sucompat\|CONFIG_KSU" fs/stat.c fs/exec.c fs/open.c || echo "(确认干净)"
+          grep -n "ksu_execveat_hook\|ksu_handle_execveat_sucompat\|ksu_vfs_read_hook\|ksu_handle_vfs_read\|CONFIG_KSU\b" fs/stat.c fs/exec.c fs/open.c fs/read_write.c || echo "(确认干净)"
 
       # 改成熟悉的"-perf-g<hash>"格式，而不是硬编码的BSP版本字符串。
       - name: Fix CONFIG_LOCALVERSION to use git-hash auto format
