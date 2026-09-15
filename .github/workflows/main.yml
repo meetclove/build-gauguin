@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Kernel Source
         run: |
           git clone --depth=1 https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin project
-          rm -rf project/drivers/kernelsu
+          
 
       - name: Build kernel
         run: |
