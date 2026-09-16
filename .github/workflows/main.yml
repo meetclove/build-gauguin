@@ -94,23 +94,25 @@ jobs:
               print("stpcpy inserted")
           EOF
 
-      - name: Fix duplicate disp_rdump_memory label in xiaomi-sm6350-common.dtsi
+      - name: Fix duplicate disp_rdump_memory label safely in xiaomi-sm6350-common.dtsi
         run: |
           cd kernel
           python3 - << 'EOF'
           path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
           with open(path) as f:
               content = f.read()
-          anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
+          
+          # 直接重命名 label 和 node 避免重复，代替有风险的 /delete-node/ 语法
+          anchor = "disp_rdump_memory: disp_rdump_region@ac000000 {"
           if anchor not in content:
-              raise SystemExit("anchor not found, need manual check")
-          if "/delete-node/ &disp_rdump_memory;" in content:
+              print("未找到原 label，可能已修复或不存在")
+          elif "disp_rdump_memory_xiaomi" in content:
               print("已经修过，跳过")
           else:
-              content = content.replace(anchor, "/delete-node/ &disp_rdump_memory;\n\n" + anchor, 1)
+              content = content.replace(anchor, "disp_rdump_memory_xiaomi: disp_rdump_region_xiaomi@ac000000 {", 1)
               with open(path, "w") as f:
                   f.write(content)
-              print("duplicate label 修复完成")
+              print("duplicate label 重命名修复完成")
           EOF
 
       - name: Add ReSukiSU to kernel source tree
@@ -269,7 +271,7 @@ jobs:
           print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
-      - name: ReSukiSU manual hook - kernel/seccomp.c (Required for Seccomp)
+      - name: ReSukiSU manual hook - kernel/seccomp.c (Required for Seccomp bypass)
         run: |
           cd kernel
           python3 - << 'EOF'
@@ -289,56 +291,12 @@ jobs:
           print("kernel/seccomp.c hook完成")
           EOF
 
-      - name: ReSukiSU manual hook - kernel/sys.c (Required for prctl)
-        run: |
-          cd kernel
-          python3 - << 'EOF'
-          import re
-          path = "kernel/sys.c"
-          with open(path) as f:
-              content = f.read()
-          if "ksu_handle_prctl" in content:
-              print("已经打过，跳过"); raise SystemExit(0)
-          
-          decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5, int *ret);\n#endif\n\n"
-          hook = "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint ret_ksu = 0;\n\tif (ksu_handle_prctl(option, arg2, arg3, arg4, arg5, &ret_ksu))\n\t\treturn ret_ksu;\n#endif\n"
-          
-          content = re.sub(r'(SYSCALL_DEFINE5\(prctl, int, option, unsigned long, arg2, unsigned long, arg3,\s*unsigned long, arg4, unsigned long, arg5\)\s*\{)', decl + r'\1\n' + hook, content)
-          with open(path, "w") as f:
-              f.write(content)
-          print("kernel/sys.c hook完成")
-          EOF
-
-      - name: ReSukiSU manual hook - fs/read_write.c (Required for vfs_read)
-        run: |
-          cd kernel
-          python3 - << 'EOF'
-          path = "fs/read_write.c"
-          with open(path) as f:
-              content = f.read()
-          if "ksu_handle_vfs_read" in content:
-              print("已经打过，跳过"); raise SystemExit(0)
-              
-          decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\n\n"
-          anchor = "\tif (!(file->f_mode & FMODE_READ))\n\t\treturn -EBADF;"
-          
-          if anchor in content:
-              hook = "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n"
-              content = content.replace("ssize_t vfs_read(", decl + "ssize_t vfs_read(", 1)
-              content = content.replace(anchor, hook + "\n" + anchor, 1)
-              with open(path, "w") as f:
-                  f.write(content)
-              print("fs/read_write.c hook完成")
-          else:
-              print("警告：未找到 vfs_read anchor，请检查源码")
-          EOF
-
       - name: Fix Kernel LOCALVERSION for specific name format
         run: |
           cd kernel
           # 替换原本配置文件里写死的版本后缀，并改为 -perf
           sed -i 's/CONFIG_LOCALVERSION=".*"/CONFIG_LOCALVERSION="-perf"/g' arch/arm64/configs/vendor/gauguin_user_defconfig
-          # 将 CONFIG_LOCALVERSION_AUTO 设为 y，启用源码提交 hash (类似 -gd70e19d0749a) 的自动追加
+          # 将 CONFIG_LOCALVERSION_AUTO 设为 y，启用源码提交 hash 自动追加
           sed -i 's/# CONFIG_LOCALVERSION_AUTO is not set/CONFIG_LOCALVERSION_AUTO=y/g' arch/arm64/configs/vendor/gauguin_user_defconfig
           # 如果原配置中压根没有相关字段，则在末尾强制补充该配置
           grep -q "CONFIG_LOCALVERSION_AUTO=y" arch/arm64/configs/vendor/gauguin_user_defconfig || echo "CONFIG_LOCALVERSION_AUTO=y" >> arch/arm64/configs/vendor/gauguin_user_defconfig
