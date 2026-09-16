@@ -1,18 +1,4 @@
-name: Build Gauguin Kernel (DtHnAme 11-1, ReSukiSU manual hook, clean)
-
-# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支, 4.19.113——你已经实测确认
-# 在当前这套A11系统上能完美开机正常使用的那颗。
-#
-# 这是一次彻底重写，不是在旧脚本上改：
-#   - 不带任何A13相关的config调整(那一批本来就是为了兼容之前的Flyme A13
-#     移植系统才加的，现在目标是A11，DtHnAme原版defconfig本身已经验证
-#     能完美开机，不需要也不应该再动它)
-#   - 不带重启强制进recovery抓日志那个debug patch，彻底清掉，只字未留
-#   - 不带susfs、不带KPM，都没成功验证过，不再浪费时间
-#
-# 只做一件事：在DtHnAme原版defconfig基础上，加ReSukiSU（manual hook方式，
-# 这个内核用不上kprobe），模块和Zygisk模块能正常刷入使用为目标，其余全部
-# 保持原样。
+name: Build Gauguin Kernel
 
 on:
   workflow_dispatch:
@@ -127,9 +113,6 @@ jobs:
               print("duplicate label 修复完成")
           EOF
 
-      # ReSukiSU集成，4个必需manual hook——之前已经用这套源码实机验证过
-      # 能正常开机、manager正确识别驱动(Manual hook类型)。这次是纯净重写，
-      # 逻辑跟之前验证过的完全一致，没有新增改动。
       - name: Add ReSukiSU to kernel source tree
         run: |
           cd kernel
@@ -286,10 +269,80 @@ jobs:
           print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
-      # CONFIG_KALLSYMS_ALL不是A13兼容性调整，是ReSukiSU自己的硬性前提——
-      # 不开这个就得手动在security/selinux/selinuxfs.c等文件里导出
-      # sel_handle_status_ops等符号，两条路二选一。这里选更简单、改动更小
-      # 的这条，其余DtHnAme原版defconfig内容不受影响。
+      - name: ReSukiSU manual hook - kernel/seccomp.c (Required for Seccomp)
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          import re
+          path = "kernel/seccomp.c"
+          with open(path) as f:
+              content = f.read()
+          if "ksu_handle_seccomp" in content:
+              print("已经打过，跳过"); raise SystemExit(0)
+          
+          decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_handle_seccomp(unsigned int op, unsigned int flags, void __user *uargs, long *ret);\n#endif\n\n"
+          hook = "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tlong ret_ksu = 0;\n\tif (ksu_handle_seccomp(op, flags, uargs, &ret_ksu))\n\t\treturn ret_ksu;\n#endif\n"
+          
+          content = re.sub(r'(static long do_seccomp\(unsigned int op, unsigned int flags,\s*void __user \*uargs\)\s*\{)', decl + r'\1\n' + hook, content)
+          with open(path, "w") as f:
+              f.write(content)
+          print("kernel/seccomp.c hook完成")
+          EOF
+
+      - name: ReSukiSU manual hook - kernel/sys.c (Required for prctl)
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          import re
+          path = "kernel/sys.c"
+          with open(path) as f:
+              content = f.read()
+          if "ksu_handle_prctl" in content:
+              print("已经打过，跳过"); raise SystemExit(0)
+          
+          decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern bool ksu_handle_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5, int *ret);\n#endif\n\n"
+          hook = "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint ret_ksu = 0;\n\tif (ksu_handle_prctl(option, arg2, arg3, arg4, arg5, &ret_ksu))\n\t\treturn ret_ksu;\n#endif\n"
+          
+          content = re.sub(r'(SYSCALL_DEFINE5\(prctl, int, option, unsigned long, arg2, unsigned long, arg3,\s*unsigned long, arg4, unsigned long, arg5\)\s*\{)', decl + r'\1\n' + hook, content)
+          with open(path, "w") as f:
+              f.write(content)
+          print("kernel/sys.c hook完成")
+          EOF
+
+      - name: ReSukiSU manual hook - fs/read_write.c (Required for vfs_read)
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          path = "fs/read_write.c"
+          with open(path) as f:
+              content = f.read()
+          if "ksu_handle_vfs_read" in content:
+              print("已经打过，跳过"); raise SystemExit(0)
+              
+          decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\n\n"
+          anchor = "\tif (!(file->f_mode & FMODE_READ))\n\t\treturn -EBADF;"
+          
+          if anchor in content:
+              hook = "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n"
+              content = content.replace("ssize_t vfs_read(", decl + "ssize_t vfs_read(", 1)
+              content = content.replace(anchor, hook + "\n" + anchor, 1)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("fs/read_write.c hook完成")
+          else:
+              print("警告：未找到 vfs_read anchor，请检查源码")
+          EOF
+
+      - name: Fix Kernel LOCALVERSION for specific name format
+        run: |
+          cd kernel
+          # 替换原本配置文件里写死的版本后缀，并改为 -perf
+          sed -i 's/CONFIG_LOCALVERSION=".*"/CONFIG_LOCALVERSION="-perf"/g' arch/arm64/configs/vendor/gauguin_user_defconfig
+          # 将 CONFIG_LOCALVERSION_AUTO 设为 y，启用源码提交 hash (类似 -gd70e19d0749a) 的自动追加
+          sed -i 's/# CONFIG_LOCALVERSION_AUTO is not set/CONFIG_LOCALVERSION_AUTO=y/g' arch/arm64/configs/vendor/gauguin_user_defconfig
+          # 如果原配置中压根没有相关字段，则在末尾强制补充该配置
+          grep -q "CONFIG_LOCALVERSION_AUTO=y" arch/arm64/configs/vendor/gauguin_user_defconfig || echo "CONFIG_LOCALVERSION_AUTO=y" >> arch/arm64/configs/vendor/gauguin_user_defconfig
+
       - name: Apply ReSukiSU defconfig fragment (nothing else touched)
         run: |
           cd kernel
@@ -310,7 +363,7 @@ jobs:
           export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
           make O=out ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon gauguin_user_defconfig
           echo "--- 确认下面这几条确实生效了，且没有任何A13/debug相关残留 ---"
-          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL" out/.config
+          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KALLSYMS_ALL|CONFIG_LOCALVERSION" out/.config
           echo "--- 确认没有任何crash-log-capture残留 ---"
           grep -c "PON_RESTART_REASON_RECOVERY\|force every restart" out/.config || echo "0 (干净)"
 
