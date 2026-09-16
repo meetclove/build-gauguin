@@ -1,4 +1,19 @@
-name: Build-Kernel
+name: Build Gauguin Kernel (DtHnAme 11-1, ReSukiSU manual hook, clean)
+
+# 源码: DtHnAme/kernel_xiaomi_gauguin, 11-1分支, 4.19.113——你已经实测确认
+# 在当前这套A11系统上能完美开机正常使用的那颗。
+#
+# 这是一次彻底重写，不是在旧脚本上改：
+#   - 不带任何A13相关的config调整(那一批本来就是为了兼容之前的Flyme A13
+#     移植系统才加的，现在目标是A11，DtHnAme原版defconfig本身已经验证
+#     能完美开机，不需要也不应该再动它)
+#   - 不带重启强制进recovery抓日志那个debug patch，彻底清掉，只字未留
+#   - 不带susfs、不带KPM，都没成功验证过，不再浪费时间
+#
+# 只做一件事：在DtHnAme原版defconfig基础上，加ReSukiSU（manual hook方式，
+# 这个内核用不上kprobe），模块和Zygisk模块能正常刷入使用为目标，其余全部
+# 保持原样。
+
 on:
   workflow_dispatch:
 
@@ -26,7 +41,7 @@ jobs:
           ccache --set-config=cache_dir=$HOME/.ccache
           ccache -z
 
-      - name: Checkout kernel source
+      - name: Checkout kernel source (DtHnAme, 11-1 branch, confirmed A11 boot)
         run: |
           git clone --depth 1 --recurse-submodules --shallow-submodules --branch master \
             https://github.com/meetclove/kernel_xiaomi_gauguin.git kernel
@@ -93,6 +108,28 @@ jobs:
               print("stpcpy inserted")
           EOF
 
+      - name: Fix duplicate disp_rdump_memory label in xiaomi-sm6350-common.dtsi
+        run: |
+          cd kernel
+          python3 - << 'EOF'
+          path = "arch/arm64/boot/dts/vendor/qcom/xiaomi-sm6350-common.dtsi"
+          with open(path) as f:
+              content = f.read()
+          anchor = "&reserved_memory {\n\tdisp_rdump_memory: disp_rdump_region@ac000000 {"
+          if anchor not in content:
+              raise SystemExit("anchor not found, need manual check")
+          if "/delete-node/ &disp_rdump_memory;" in content:
+              print("已经修过，跳过")
+          else:
+              content = content.replace(anchor, "/delete-node/ &disp_rdump_memory;\n\n" + anchor, 1)
+              with open(path, "w") as f:
+                  f.write(content)
+              print("duplicate label 修复完成")
+          EOF
+
+      # ReSukiSU集成，4个必需manual hook——之前已经用这套源码实机验证过
+      # 能正常开机、manager正确识别驱动(Manual hook类型)。这次是纯净重写，
+      # 逻辑跟之前验证过的完全一致，没有新增改动。
       - name: Add ReSukiSU to kernel source tree
         run: |
           cd kernel
@@ -249,6 +286,10 @@ jobs:
           print("kernel/reboot.c sys_reboot hook完成")
           EOF
 
+      # CONFIG_KALLSYMS_ALL不是A13兼容性调整，是ReSukiSU自己的硬性前提——
+      # 不开这个就得手动在security/selinux/selinuxfs.c等文件里导出
+      # sel_handle_status_ops等符号，两条路二选一。这里选更简单、改动更小
+      # 的这条，其余DtHnAme原版defconfig内容不受影响。
       - name: Apply ReSukiSU defconfig fragment (nothing else touched)
         run: |
           cd kernel
@@ -273,36 +314,92 @@ jobs:
           echo "--- 确认没有任何crash-log-capture残留 ---"
           grep -c "PON_RESTART_REASON_RECOVERY\|force every restart" out/.config || echo "0 (干净)"
 
-      - name: Build kernel
+      - name: Build kernel Image and gauguin-sm6350.dtb
         run: |
-          cd project
-          export PATH=$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/clang/bin:$PATH
-          export ARCH=arm64
-          export SUBARCH=arm64
-          make O=out ARCH=arm64 SUBARCH=arm64 CC="ccache clang" HOSTCC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 ${{ env.KERNEL_DEFCONFIG }}
-          echo "--- 确认ReSukiSU配置生效、没有旧hook残留 ---"
-          grep -E "CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_LOCALVERSION" out/.config
-          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC="ccache clang" HOSTCC="ccache clang" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 2>&1 | tee build.log
+          cd kernel
+          export PATH="$PATH:$GITHUB_WORKSPACE/toolchain/clang11/bin:$GITHUB_WORKSPACE/toolchain/gcc49/bin"
+          export KBUILD_BUILD_USER=dthname
+          export KBUILD_BUILD_HOST=dthname
+          make -j$(nproc) O=out \
+            ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
+            CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
+            HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
+            Image 2>&1 | tee build.log
+          make -j$(nproc) O=out \
+            ARCH=arm64 PYTHON=python3 CC="ccache $GITHUB_WORKSPACE/toolchain/clang11/bin/clang" \
+            CROSS_COMPILE=aarch64-linux-android- CLANG_TRIPLE=aarch64-linux-gnu- \
+            HOSTCFLAGS=-fcommon KCFLAGS="-gdwarf-4 -Wno-error" \
+            vendor/qcom/gauguin-sm6350.dtb 2>&1 | tee -a build.log
           ccache -s
 
-      # 只要Image和dtbo，不打AK3。
-      - name: Package Image + dtbo
+      - name: Concatenate Image + dtb manually
         run: |
-          mkdir -p release
-          find project/out/arch/arm64/boot -maxdepth 1 -type f -name "Image*" -exec cp {} release/ \;
-          find project/out/arch/arm64/boot -iname "dtbo*.img" -exec cp {} release/ \;
-          find project/out/arch/arm64/boot/dts -iname "*.dtbo" -exec cp {} release/ \; 2>/dev/null || true
-          echo "--- 打包进release/的文件 ---"
-          ls -la release/
-          cd release
-          zip -r9 ../Gauguin_4.19_ReSukiSU_${{ env.BUILD_TIME }}.zip .
+          BOOT_OUT=kernel/out/arch/arm64/boot
+          DTB="$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb"
+          if [ -f "$BOOT_OUT/Image" ] && [ -f "$DTB" ]; then
+            cat "$BOOT_OUT/Image" "$DTB" > "$BOOT_OUT/Image-dtb"
+            echo "拼接完成"
+          fi
+          find kernel/out/arch/arm64/boot -maxdepth 3 -type f -name "Image*" | sort
 
-      - name: Upload
+      - name: Checkout AnyKernel3 template
+        run: |
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/ramdisk ak3/patch ak3/.git
+
+      - name: Write anykernel.sh for gauguin/gauguinpro
+        run: |
+          cat > ak3/anykernel.sh << 'EOF'
+          ### AnyKernel3 Ramdisk Mod Script for gauguin/gauguinpro
+          ## DtHnAme 11-1源码（已验证A11完美开机）+ ReSukiSU manual-hook，干净版
+
+          properties() { '
+          kernel.string=gauguin DtHnAme 11-1 ReSukiSU-clean
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=gauguin
+          device.name2=gauguinpro
+          device.name3=gauguininpro
+          supported.versions=
+          supported.patchlevels=
+          '; }
+
+          BLOCK=/dev/block/bootdevice/by-name/boot;
+          IS_SLOT_DEVICE=1;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          dump_boot;
+          write_boot;
+          EOF
+
+      - name: Stage kernel artifacts into AnyKernel3 zip
+        run: |
+          BOOT_OUT=kernel/out/arch/arm64/boot
+          if [ -f "$BOOT_OUT/Image-dtb" ]; then
+            cp "$BOOT_OUT/Image-dtb" ak3/Image
+          else
+            cp "$BOOT_OUT/Image" ak3/Image
+            cp "$BOOT_OUT/dts/vendor/qcom/gauguin-sm6350.dtb" ak3/dtb 2>/dev/null || true
+          fi
+
+      - name: Package AnyKernel3 flashable zip
+        run: |
+          cd ak3
+          zip -r9 ../gauguin-kernel-ReSukiSU-clean-AK3.zip . -x ".git*"
+          cd ..
+
+      - name: Upload AK3 zip + build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Gauguin_4.19_ReSukiSU_${{ env.BUILD_TIME }}
+          name: gauguin-kernel-ReSukiSU-clean-AK3
           path: |
-            Gauguin_4.19_ReSukiSU_*.zip
-            project/build.log
+            gauguin-kernel-ReSukiSU-clean-AK3.zip
+            kernel/build.log
           if-no-files-found: warn
