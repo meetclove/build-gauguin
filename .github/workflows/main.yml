@@ -39,7 +39,7 @@ jobs:
       - name: Checkout Kernel Source
         run: |
           git clone --depth=1 \
-            https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin \
+            https://github.com/meetclove/kernel_xiaomi_gauguin \
             project
 
           rm -rf project/drivers/kernelsu
