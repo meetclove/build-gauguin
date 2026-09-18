@@ -1,0 +1,110 @@
+name: Build Gauguin 4.19 ReSukiSU
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout kernel source workflow
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Configuration
+        run: |
+          echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> "$GITHUB_ENV"
+
+      - name: Setup build kernel environment
+        run: |
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl wget flex lzop bison make libssl-dev \
+            python3 python-is-python3 libncurses-dev libelf-dev bc
+
+      - name: Download Toolchains
+        run: |
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+            gcc64
+
+          wget -q \
+            https://github.com/ZyCromerZ/Clang/releases/download/11.1.0-20220724-release/Clang-11.1.0-20220724.tar.gz
+
+          mkdir -p clang
+          tar -xzf Clang-11.1.0-20220724.tar.gz -C clang
+
+      - name: Checkout Kernel Source
+        run: |
+          git clone --depth=1 \
+            https://github.com/Dhollmen/Kernel_Xiaomi_Gauguin \
+            project
+
+          rm -rf project/drivers/kernelsu
+
+      - name: Setup ReSukiSU
+        working-directory: project
+        run: |
+          curl -LSs \
+            "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" \
+            | bash
+
+      - name: Apply ReSukiSU 4.19 dynamic manual hooks
+        run: |
+          install -m 0755 resukisu_4.19_dynamic_patch.sh project/resukisu_4.19_dynamic_patch.sh
+          cd project
+          DEFCONFIG="arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}" \
+            ./resukisu_4.19_dynamic_patch.sh
+
+      - name: Build kernel
+        run: |
+          cd project
+          export PATH="$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CC=clang
+          export HOSTCC=clang
+          export HOSTCXX=clang++
+          export LD=ld.lld
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+          make O=out \
+            ARCH=arm64 SUBARCH=arm64 \
+            CC=clang HOSTCC=clang HOSTCXX=clang++ \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1 \
+            "${{ env.KERNEL_DEFCONFIG }}"
+
+          make -j"$(nproc)" O=out \
+            ARCH=arm64 SUBARCH=arm64 \
+            CC=clang HOSTCC=clang HOSTCXX=clang++ \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1
+
+      - name: Verify ReSukiSU configuration and hooks
+        run: |
+          cd project
+          grep -E '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KSU_SUSFS=|CONFIG_KALLSYMS_ALL=)' \
+            out/.config || true
+
+          echo "=== ReSukiSU hook symbols in source ==="
+          grep -RnsE \
+            'ksu_handle_execveat|ksu_handle_post_execveat|ksu_handle_faccessat|ksu_handle_sys_reboot|ksu_handle_sys_read|ksu_handle_stat|ksu_handle_newfstat_ret' \
+            fs kernel | head -80 || true
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gauguin_4.19_ReSukiSU_${{ env.BUILD_TIME }}
+          path: |
+            project/out/arch/arm64/boot/*
