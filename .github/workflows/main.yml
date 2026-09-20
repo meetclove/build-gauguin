@@ -64,7 +64,7 @@ jobs:
             LLVM=1 LLVM_IAS=1
 
       - name: Upload Compile Artifact
-        uses: github/upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: Image-venus-pure
           path: kernel_workspace/out/arch/arm64/boot/Image
