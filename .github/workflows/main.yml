@@ -17,15 +17,19 @@ jobs:
       - name: 准备编译环境 (Setup Build Environment)
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev
+          sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf liblz4-tool libncurses-dev libssl-dev libxml2 libxml2-utils lzop rsync squashfs-tools wget zip zlib1g-dev python3
 
       - name: 拉取内核源码 (Clone Kernel Source)
         run: |
-          git clone --depth=1 -b 14-rebase https://github.com/meetclove/android_kernel_xiaomi_sm8350.git kernel_workspace
+          git clone --depth=1 -b hyper-14 https://github.com/EndCredits/android_kernel_xiaomi_sm8350.git kernel_workspace
+
+      - name: 补齐缺失的 KSU 源码 (Satisfy KSU Dependencies)
+        working-directory: kernel_workspace
+        run: |
+          echo "拉取 KernelSU 源码以修复 Kconfig 和底层 hook 缺失报错..."
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
 
       - name: 拉取 Clang 工具链 (Clone Toolchain)
-        # 这里使用高兼容性的 Proton Clang 替代原始的 Clang 11.0.2，
-        # 它在编译 5.4 版本内核时速度更快且极少报语法警告错误。
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
 
@@ -42,7 +46,6 @@ jobs:
           make O=out CC=clang ${{ github.event.inputs.defconfig }}
 
           echo "开始多线程编译内核..."
-          # 使用 LLVM=1 和 LLVM_IAS=1 启用全栈 LLVM 编译，符合 QGKI 标准
           make -j$(nproc --all) O=out \
                                 CC=clang \
                                 CROSS_COMPILE=aarch64-linux-gnu- \
@@ -54,4 +57,4 @@ jobs:
         with:
           name: Image-venus-pure
           path: kernel_workspace/out/arch/arm64/boot/Image
-          compression-level: 0 # 内核文件本身无需在此阶段过度压缩
+          compression-level: 0
