@@ -21,7 +21,7 @@ jobs:
 
       - name: 拉取内核源码 (Clone Kernel Source)
         run: |
-          git clone --depth=1 -b hyper-14 https://github.com/meetclove/android_kernel_xiaomi_sm8350.git kernel_workspace
+          git clone --depth=1 -b 14-rebase https://github.com/meetclove/android_kernel_xiaomi_sm8350.git kernel_workspace
 
       - name: 拉取 Clang 工具链 (Clone Toolchain)
         # 这里使用高兼容性的 Proton Clang 替代原始的 Clang 11.0.2，
