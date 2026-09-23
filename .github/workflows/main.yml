@@ -55,18 +55,6 @@ jobs:
               patch -p1 < susfs.patch
               bash inline.sh 
               
-              cd ${GITHUB_WORKSPACE}/
-              git clone https://github.com/Sakion-Team/Re-Kernel/ -b main --depth=1
-              git clone https://github.com/maxsteeel/nomount/ -b master --depth=1
-              mkdir ${GITHUB_WORKSPACE}/gauguin/fs/nomount
-              mkdir ${GITHUB_WORKSPACE}/gauguin/drivers/rekernel
-              cp ${GITHUB_WORKSPACE}/Re-Kernel/Integrate/rekernel/* ${GITHUB_WORKSPACE}/gauguin/drivers/rekernel
-              cp ${GITHUB_WORKSPACE}/nomount/kernel/src/* ${GITHUB_WORKSPACE}/gauguin/fs/nomount
-              cd ${GITHUB_WORKSPACE}/gauguin/
-              bash ${GITHUB_WORKSPACE}/Re-Kernel/Integrate/patches.sh 
-              bash ${GITHUB_WORKSPACE}/nomount/kernel/setup.sh 
-              
-              touch ./.scmversion
          
       - name: Make Kernel Configs
         run: |
